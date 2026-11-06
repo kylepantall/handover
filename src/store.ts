@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { replaceFileSync } from './paths.ts';
 import {
   FAILURE,
   STATUS,
@@ -227,7 +228,7 @@ export class Store {
     const tmp = `${this.#file}.${process.pid}.tmp`;
     const state = { version: STATE_VERSION, seq: this.#seq, tasks: [...this.#tasks.values()] };
     fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
-    fs.renameSync(tmp, this.#file);
+    replaceFileSync(tmp, this.#file);
   }
 
   #load(): void {

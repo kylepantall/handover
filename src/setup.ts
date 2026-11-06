@@ -88,8 +88,13 @@ async function apply(p: Paths, config: Config, opts: SetupOptions, say: (msg: st
   say(`Saved ${p.config}`);
 
   if (config.relay && opts.service) {
-    await installService();
-    say((await waitForRelay(config.url!, config.token!)) ? 'Relay started and will run at login' : 'Relay service installed, but it is not answering yet (handover doctor)');
+    try {
+      await installService();
+      say((await waitForRelay(config.url!, config.token!)) ? 'Relay started and will run at login' : 'Relay service installed, but it is not answering yet (handover doctor)');
+    } catch (err) {
+      // Not fatal: the relay also runs inside Claude Code's MCP server, wait and worker.
+      say(`Could not install the login service (${(err as Error).message}); the relay will run while Claude Code or a handover command is open`);
+    }
   }
   if (opts.claude) {
     if ((await claudeRegistration()) === 'registered') say('Claude Code: MCP server already registered');

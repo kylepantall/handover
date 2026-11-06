@@ -83,8 +83,10 @@ function Install-Handover {
     # A running relay holds handover.exe open; stop it for the swap.
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $schtasks /Query /TN $Task 2>&1 | Out-Null
+    $taskXml = (& $schtasks /Query /TN $Task /XML 2>&1 | ForEach-Object { "$_" }) -join "`n"
     $hadTask = $LASTEXITCODE -eq 0
+    # v0.5.0 created a hidden task run through conhost --headless: the pattern antivirus flagged.
+    $legacyTask = $hadTask -and ($taskXml -match 'conhost|<Hidden>true')
     if ($hadTask) { & $schtasks /End /TN $Task 2>&1 | Out-Null; Start-Sleep -Seconds 1 }
     $ErrorActionPreference = $previous
 
@@ -121,10 +123,20 @@ function Install-Handover {
       }
     }
 
-    if ($hadTask) {
+    # Never let the logon task stop the install: setup and Claude Code don't need it.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    if ($legacyTask) {
+      Write-Step 'Removing the old hidden logon task'
+      & $schtasks /Delete /TN $Task /F 2>&1 | Out-Null
+      if ($LASTEXITCODE -eq 0) { Write-Info 'Removed. The relay now runs while Claude Code is open (handover service install for a visible login task).' }
+      else { Write-Info "Could not remove it (access denied?). Delete the '$Task' task in Task Scheduler yourself." }
+    } elseif ($hadTask) {
       Write-Step 'Restarting the relay'
-      & $exe service restart
+      & $exe service restart 2>&1 | ForEach-Object { Write-Info "$_" }
+      if ($LASTEXITCODE -ne 0) { Write-Info 'Could not restart the login task; carrying on (handover doctor shows its state).' }
     }
+    $ErrorActionPreference = $previous
 
     $setupArgs = @()
     if ($Peer) { $setupArgs += '--peer' }

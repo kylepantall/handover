@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.4
+
+Windows fixes from a real install with Bitdefender:
+
+- Config and queue writes retry for a moment when the file is locked (EPERM/EACCES/EBUSY, typically antivirus scanning the file just written), then fall back to copying over it.
+- The installer removes the hidden logon task left by v0.5.0 instead of recreating it, and never aborts over the logon task.
+- Setup treats a login service that can't be installed as a warning: the relay also runs inside Claude Code's MCP server, `wait` and `worker`.
+
 ## 0.6.3
 
 - Windows installer: adding handover to your user PATH is best-effort. If security software or policy blocks it (`UnauthorizedAccessException`), install and setup carry on, since Claude Code uses the full path.
