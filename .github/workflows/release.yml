@@ -1,0 +1,54 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching package.json) to publish the Windows build.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - name: Tag matches package.json
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match package.json $version" }
+      - run: bun install --frozen-lockfile
+      - run: bun test tests
+      - name: Build
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          ./dist/handover/handover.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'handover.exe --version failed' }
+          $scripts = Get-ChildItem dist/handover -Recurse -Include *.cmd, *.bat, *.ps1, *.vbs
+          if ($scripts) { throw "Scripts in the release: $($scripts.FullName -join ', ')" }
+      - name: Release notes from CHANGELOG.md
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="## $version" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "CHANGELOG.md has no ## $version section" >&2; exit 1; fi
+          cat >> notes.md <<'NOTES'
+
+          **Windows:** install or update with
+          ```powershell
+          & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1)))
+          ```
+          or `handover update`. The installer checks the download against `SHA256SUMS`. macOS and Linux install from source with `install.sh`.
+          NOTES
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME dist/handover-windows-x64.zip dist/SHA256SUMS --title "handover $env:GITHUB_REF_NAME" --notes-file notes.md --verify-tag

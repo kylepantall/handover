@@ -43,16 +43,17 @@ EOF
 }
 
 main() {
-  local ref='main' run_setup=true
+  local ref='main' run_setup=true has_mode=false claude=false
   local -a setup_args=()
   while (($#)); do
     case "$1" in
       --help | -h) usage; return ;;
       --no-setup) run_setup=false ;;
-      --relay | --peer) setup_args+=("$1") ;;
-      --claude) setup_args+=(--claude --hook) ;;
+      --relay | --peer) setup_args+=("$1"); has_mode=true ;;
+      --claude) setup_args+=(--claude --hook); claude=true ;;
       --join | --token | --agent)
         [[ $# -ge 2 ]] || { printf '%s needs a value.\n' "$1" >&2; return 1; }
+        [[ "$1" != --join ]] || has_mode=true
         setup_args+=("$1" "$2")
         shift
         ;;
@@ -178,13 +179,13 @@ main() {
 
   [[ "$run_setup" == true ]] || { printf '\nhandover installed. Next: handover setup\n'; return; }
 
-  if ((${#setup_args[@]})); then
+  local data_dir="${HANDOVER_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/handover}"
+  # A mode (or --claude on an existing setup) runs without questions.
+  if [[ "$has_mode" == true || ( "$claude" == true && -f "$data_dir/config.json" ) ]]; then
     step 'Setup'
     "$bin_dir/handover" setup "${setup_args[@]}"
     return
   fi
-
-  local data_dir="${HANDOVER_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/handover}"
   # Under curl | bash, stdin is the pipe. Hand setup the real terminal behind stdout.
   local tty_dev=''
   if [[ -t 0 ]]; then

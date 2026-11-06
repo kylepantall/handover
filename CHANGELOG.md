@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Windows 11: `install.ps1` installs a compiled `handover.exe` from GitHub Releases (checked against `SHA256SUMS`), adds it to your user PATH and runs setup. `-Peer`, `-Relay`, `-Join`, `-Token`, `-Agent`, `-Claude`.
+- The relay runs at logon on Windows through Task Scheduler (hidden console, no battery or time limits, restarts on failure).
+- `handover link`: prints the commands that connect another machine, for macOS/Linux and Windows, with the token. Setup shows the same.
+- `handover update` on Windows installs the latest release in place.
+- Config on Windows lives in `%APPDATA%\handover`.
+- `serve --log FILE` and `serve --home DIR`.
+- Fix: the installer's `--claude` on an existing setup no longer needs a terminal.
+
 ## 0.4.0
 
 - Peer-to-peer mode: `handover setup --peer` (or `install.sh --peer --token <secret>`). Every machine runs its own small relay and peers find each other by mDNS (`_handover._tcp`), so there are no addresses to type.

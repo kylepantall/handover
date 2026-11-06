@@ -1,17 +1,26 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { appRoot, writePrivate } from './paths.ts';
+import { appRoot, compiled, isWindows, writePrivate } from './paths.ts';
 import { runProcess } from './process.ts';
 
 /** argv that runs this install's CLI with `sub` (the launcher when installed). */
 export function selfCommand(...sub: string[]): string[] {
+  if (compiled) return [process.execPath, ...sub];
   const launcher = process.env.HANDOVER_LAUNCHER;
   if (launcher) return [launcher, ...sub];
   return [process.execPath, join(appRoot, 'src', 'index.ts'), ...sub];
 }
 
-const shellQuote = (s: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+/**
+ * Quotes one word of a hook command. Claude Code runs hooks through a shell:
+ * sh on macOS/Linux, and on Windows Git Bash or cmd, where only double quotes
+ * work in both (and forward slashes avoid backslash escapes).
+ */
+const shellQuote = (s: string): string => {
+  if (isWindows) return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `"${s.replace(/\\/g, '/')}"`;
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+};
 
 export async function claudeRegistration(): Promise<'registered' | 'missing' | 'no-claude'> {
   const claude = Bun.which('claude');
@@ -60,7 +69,7 @@ const hookCommand = () => selfCommand('hook').map(shellQuote).join(' ');
 /** This install's hook, or any `…/handover hook` (e.g. from an earlier install path). */
 const isOurHook = (h: HookEntry) => {
   const command = typeof h.command === 'string' ? h.command.trim() : '';
-  return command === hookCommand() || /(^|[/\s'])handover'? hook$/.test(command);
+  return command === hookCommand() || /(^|[/\\\s'"])handover(\.exe)?['"]? hook$/i.test(command);
 };
 
 export async function hookInstalled(file = claudeSettingsPath()): Promise<boolean> {

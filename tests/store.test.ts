@@ -96,7 +96,7 @@ test('state persists across restarts', async () => {
   a.create({ id: 'two', objective: 'y' });
   a.claim('two', { by: 'w' });
   a.flush();
-  expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+  if (process.platform !== 'win32') expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
 
   const b = new Store({ file });
   expect(b.get('one').priority).toBe(2);

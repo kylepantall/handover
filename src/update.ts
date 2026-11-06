@@ -8,7 +8,9 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { REPO } from './paths.ts';
+import { compiled, isWindows, REPO } from './paths.ts';
+import { installWindowsRelease } from './release.ts';
+import { installService, serviceState } from './service.ts';
 import { VERSION } from './version.ts';
 
 const REF = /^[A-Za-z0-9._/-]+$/;
@@ -57,6 +59,16 @@ export async function runUpdate({ check = false, force = false, ref = 'main' }: 
   if (check) return diff > 0 ? 10 : 0;
   if (diff <= 0 && !force) {
     console.log(diff === 0 ? 'Already up to date.' : 'Installed version is newer; use --force to install it anyway.');
+    return 0;
+  }
+  if (isWindows) {
+    // Windows runs the compiled release; it updates from GitHub Releases only.
+    if (!compiled) throw new Error('This copy runs from source; update it with git pull.');
+    if (ref !== 'main') throw new Error('On Windows, handover updates to the latest release; --ref is not supported.');
+    const wasRunning = (await serviceState()) === 'running';
+    await installWindowsRelease(latest);
+    if (wasRunning) await installService(); // restarts the relay on the new exe
+    console.log(`Updated to ${latest}. Restart Claude Code to load it.`);
     return 0;
   }
   if (!process.env.HANDOVER_LAUNCHER) throw new Error('This copy was not installed by the installer; update it with git pull.');

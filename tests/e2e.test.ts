@@ -126,7 +126,10 @@ test('worker auto-picks up and falls back to agent stdout', async () => {
   await cancelPending();
   const waiter = run(['wait', '--objective', 'echo me back', '--json']);
   await idOf(waiter);
-  const worker = run(['worker', '--exec', 'grep -c "echo me back"', '--once']);
+  // A tiny agent that works in sh and cmd.exe alike: prints 1 if the briefing mentions the objective.
+  const agent = path.join(tmp, 'agent.ts');
+  await fs.writeFile(agent, "console.log((await Bun.stdin.text()).includes('echo me back') ? 1 : 0)");
+  const worker = run(['worker', '--exec', `"${process.execPath}" "${agent}"`, '--once']);
   expect((await worker.done).code).toBe(0);
   const { code, stdout } = await waiter.done;
   expect(code).toBe(0);

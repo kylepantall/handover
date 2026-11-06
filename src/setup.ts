@@ -4,13 +4,15 @@
  */
 
 import * as ui from '@clack/prompts';
+import { existsSync } from 'node:fs';
 import { claudeRegistration, hookInstalled, installHook, registerWithClaude } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, saveConfig } from './config.ts';
 import { formatChecks, runChecks } from './doctor.ts';
 import type { Paths } from './paths.ts';
 import { PeerBrowser } from './discovery.ts';
-import { generateToken, lanAddresses } from './server.ts';
+import { formatLink, linkInfo } from './link.ts';
+import { generateToken } from './server.ts';
 import { installService, serviceSupported } from './service.ts';
 import { validateAgent } from './store.ts';
 import { TUNNELS, type Config, type Tunnel } from './types.ts';
@@ -33,8 +35,6 @@ export interface SetupOptions {
   /** Start the relay at login (relay and peer mode; default yes where supported). */
   service?: boolean;
 }
-
-const INSTALL_URL = 'https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh';
 
 function bail<T>(value: T): Exclude<T, symbol> {
   if (ui.isCancel(value)) {
@@ -80,28 +80,7 @@ async function findPeers(token: string, self: string): Promise<string[]> {
   return [...new Set(names)];
 }
 
-function peerHint(config: Config): string {
-  return [
-    'On each other machine on this network, run:',
-    '',
-    `  curl -fsSL ${INSTALL_URL} | bash -s -- --peer --token ${config.token}`,
-    '',
-    'Peers find each other automatically; no addresses needed.',
-  ].join('\n');
-}
-
-function joinHint(config: Config): string {
-  if (config.peer) return peerHint(config);
-  const port = config.relay?.port ?? DEFAULT_PORT;
-  const url = lanAddresses().map((ip) => `http://${ip}:${port}`)[0] ?? `http://<this-machine>:${port}`;
-  return [
-    'On each other machine, run:',
-    '',
-    `  curl -fsSL ${INSTALL_URL} | bash -s -- --join ${url} --token ${config.token}`,
-    '',
-    config.relay?.tunnel ? `Off your network, use the ${config.relay.tunnel} URL from: handover service log` : 'Off your network: rerun setup with a tunnel (tailscale or cloudflared).',
-  ].join('\n');
-}
+const joinHint = (config: Config) => formatLink(linkInfo(config));
 
 /** Applies a finished set of answers: config, service, Claude Code. */
 async function apply(p: Paths, config: Config, opts: SetupOptions, say: (msg: string) => void): Promise<void> {
@@ -125,6 +104,12 @@ async function apply(p: Paths, config: Config, opts: SetupOptions, say: (msg: st
 export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
   const existing = await loadConfig(p);
   const scripted = opts.relay || opts.join || opts.peer;
+
+  // Only Claude Code wiring requested (e.g. installer --claude on an existing setup).
+  if (!scripted && (opts.claude || opts.hook) && existsSync(p.config)) {
+    await apply(p, existing, { claude: opts.claude, hook: opts.hook }, (m) => console.log(m));
+    return 0;
+  }
 
   if (scripted) {
     if ([opts.relay, opts.join, opts.peer].filter(Boolean).length > 1) throw new Error('use one of --relay, --join or --peer');

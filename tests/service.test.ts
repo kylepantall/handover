@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { plist, unit } from '../src/service.ts';
+import { plist, taskXml, unit } from '../src/service.ts';
 
 const saved = process.env.HANDOVER_HOME;
 afterEach(() => {
@@ -19,4 +19,14 @@ test('without HANDOVER_HOME the service uses the default folder', () => {
   expect(plist()).not.toContain('HANDOVER_HOME');
   expect(unit()).not.toContain('HANDOVER_HOME');
   expect(plist()).toContain('<key>PATH</key>');
+});
+
+test('the Windows logon task passes the data folder and log, hides its console, and has no time limit', () => {
+  process.env.HANDOVER_HOME = '/tmp/hand over';
+  const xml = taskXml();
+  expect(xml).toContain('conhost.exe</Command>');
+  expect(xml).toMatch(/--headless .* serve --home "\/tmp\/hand over" --log /);
+  expect(xml).toContain('<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>');
+  expect(xml).toContain('<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>');
+  expect(xml).toContain('<LogonTrigger>');
 });

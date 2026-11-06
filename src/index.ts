@@ -2,7 +2,9 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { EXIT, hook, list, mcp, serve, wait, worker } from './commands.ts';
 import { endpoint, loadConfig } from './config.ts';
+import { readFile } from 'node:fs/promises';
 import { runDoctor } from './doctor.ts';
+import { formatLink, linkInfo } from './link.ts';
 import { paths } from './paths.ts';
 import { installService, serviceState, uninstallService } from './service.ts';
 import { runSetup } from './setup.ts';
@@ -28,16 +30,17 @@ Usage: handover <command>
   list [--status S] [--for AGENT]
   serve                         Run the relay in the foreground (the service runs this)
         [--port N] [--host H] [--tunnel T] [--data FILE|none] [--lease SEC]
-        [--max-attempts N] [--retention HOURS]
+        [--max-attempts N] [--retention HOURS] [--log FILE] [--home DIR]
   service install|uninstall|restart|status|log
-                                Run the relay at login (launchd on macOS, systemd --user on Linux)
-  token                         Print the relay token (to join other machines)
+                                Run the relay at login (launchd, systemd --user, or Task Scheduler)
+  link [--json]                 Print the commands that connect another machine (macOS/Linux and Windows)
+  token                         Print the relay token / peer secret
   doctor [--json]               Check config, relay, service and Claude Code
   update [--check] [--ref R]    Install the latest version from GitHub
   mcp                           MCP server over stdio; Claude Code starts this
   hook                          Claude Code SessionStart hook
 
-Config: ~/.config/handover/config.json (HANDOVER_HOME overrides the folder).
+Config: ~/.config/handover/config.json, %APPDATA%\\handover on Windows (HANDOVER_HOME overrides).
 Env overrides: HANDOVER_URL, HANDOVER_TOKEN, HANDOVER_AGENT.`;
 
 const s = { type: 'string' } as const;
@@ -47,7 +50,8 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
   wait: { objective: s, context: s, 'context-file': s, id: s, to: s, priority: s, out: s, timeout: s, json: b },
   worker: { exec: s, agent: s, lease: s, interval: s, once: b },
   list: { status: s, for: s },
-  serve: { port: s, host: s, token: s, tunnel: s, data: s, lease: s, 'max-attempts': s, retention: s },
+  serve: { port: s, host: s, token: s, tunnel: s, data: s, lease: s, 'max-attempts': s, retention: s, log: s, home: s },
+  link: { json: b },
   doctor: { json: b },
   update: { check: b, force: b, ref: s },
 };
@@ -70,12 +74,13 @@ async function main(argv: string[]): Promise<number | null> {
   if (process.env.HANDOVER_CWD) process.chdir(process.env.HANDOVER_CWD);
 
   const [command, ...rest] = argv;
-  const p = paths();
   const { values: o, positionals } = parseArgs({ args: rest, options: OPTIONS[command ?? ''] ?? {}, allowPositionals: true }) as {
     values: Record<string, string | boolean | undefined>;
     positionals: string[];
   };
   const str = (k: string) => o[k] as string | undefined;
+  // --home: the Windows logon task can't set HANDOVER_HOME, so it passes the folder.
+  const p = paths(command === 'serve' ? str('home') : undefined);
 
   switch (command) {
     case undefined:
@@ -111,6 +116,7 @@ async function main(argv: string[]): Promise<number | null> {
         leaseSeconds: num(o.lease, 'lease'),
         maxAttempts: num(o['max-attempts'], 'max-attempts'),
         retentionHours: num(o.retention, 'retention'),
+        log: str('log'),
       });
       return null; // keep serving
     case 'wait':
@@ -144,6 +150,11 @@ async function main(argv: string[]): Promise<number | null> {
       return runDoctor(p, { json: o.json === true });
     case 'update':
       return runUpdate({ check: o.check === true, force: o.force === true, ref: str('ref') });
+    case 'link': {
+      const info = linkInfo(await loadConfig(p));
+      console.log(o.json ? JSON.stringify(info, null, 2) : formatLink(info));
+      return EXIT.ok;
+    }
     case 'token': {
       const { token } = endpoint(await loadConfig(p));
       if (!token) throw new Error('no token yet: run handover setup');
@@ -162,8 +173,8 @@ async function main(argv: string[]): Promise<number | null> {
         console.log(await serviceState());
       } else if (action === 'log') {
         console.log(p.log);
-        const tail = Bun.spawn(['tail', '-n', '40', p.log], { stdout: 'inherit', stderr: 'inherit' });
-        await tail.exited;
+        const text = await readFile(p.log, 'utf8').catch(() => '(no log yet)\n');
+        process.stdout.write(text.split(/\r?\n/).slice(-41).join('\n'));
       } else {
         throw new Error('Usage: handover service install|uninstall|restart|status|log');
       }

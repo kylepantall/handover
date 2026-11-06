@@ -1,7 +1,9 @@
 /** serve, wait, worker, hook, list, mcp. */
 
 import { spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
+import { format } from 'node:util';
 import path from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { RelayError } from './client.ts';
@@ -31,9 +33,26 @@ export interface ServeOptions {
   leaseSeconds?: number;
   maxAttempts?: number;
   retentionHours?: number;
+  /** Append everything serve prints to this file (the Windows service has no console). */
+  log?: string;
+}
+
+function teeConsole(file: string): void {
+  const out = createWriteStream(file, { flags: 'a' });
+  for (const level of ['log', 'error', 'warn'] as const) {
+    const original = console[level].bind(console);
+    console[level] = (...args: unknown[]) => {
+      out.write(`${new Date().toISOString()} ${format(...args)}\n`);
+      original(...args);
+    };
+  }
 }
 
 export async function serve(p: Paths, o: ServeOptions): Promise<void> {
+  if (o.log) {
+    await fs.mkdir(path.dirname(o.log), { recursive: true });
+    teeConsole(o.log);
+  }
   const config = await loadConfig(p);
   const relay = config.relay ?? {};
   const port = o.port ?? relay.port ?? DEFAULT_PORT;

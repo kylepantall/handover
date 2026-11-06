@@ -43,7 +43,7 @@ test('scripted relay setup writes a private config with a token', async () => {
   expect(config.url).toBe('http://127.0.0.1:7999');
   expect(config.agent).toBe('box');
   expect(config.token?.length).toBeGreaterThanOrEqual(32);
-  expect((await fs.stat(p.config)).mode & 0o777).toBe(0o600);
+  if (process.platform !== 'win32') expect((await fs.stat(p.config)).mode & 0o777).toBe(0o600);
 
   // Rerunning keeps the token, so joined machines keep working.
   console.log = () => {};

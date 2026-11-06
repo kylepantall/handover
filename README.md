@@ -13,7 +13,7 @@ Hand a task from one machine to an AI agent on another, and get the result back 
 
 ## Install
 
-**macOS / Linux** — one command per machine. Pick a mode:
+One command per machine, on macOS, Linux or Windows 11. Pick a mode:
 
 | Mode | Best for | Setup |
 |---|---|---|
@@ -24,15 +24,12 @@ Hand a task from one machine to an AI agent on another, and get the result back 
 
 First machine:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh | bash -s -- --peer --claude
-```
+| OS | Command |
+|---|---|
+| macOS / Linux | `curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh \| bash -s -- --peer --claude` |
+| Windows (PowerShell) | `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Peer -Claude` |
 
-It prints the secret. Every other machine:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh | bash -s -- --peer --token <secret> --claude
-```
+Then run **`handover link`** on it: it prints the exact command for every other machine, macOS/Linux and Windows, with the secret filled in.
 
 Each machine runs a small relay at login holding the tasks it creates, and announces itself on the network. Agents see and work on tasks from every peer.
 
@@ -42,25 +39,27 @@ Each machine runs a small relay at login holding the tasks it creates, and annou
 curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh | bash
 ```
 
-Choose "Run a relay here". It prints the join command for other machines:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh | bash -s -- --join http://192.168.1.20:7777 --token <token>
-```
+Choose "Run a relay here" (Windows: the `install.ps1` command above with `-Relay`). `handover link` prints the join commands for other machines.
 
 Running the installer with no options starts the guided `handover setup`, which offers all three choices.
 
-| Installer option | Does |
+| Installer option (`install.sh` / `install.ps1`) | Does |
 |---|---|
-| `--peer [--token T]` | Peer-to-peer; omit `--token` on the first machine |
-| `--relay` | Make this machine the relay |
-| `--join URL --token T` | Connect to a relay |
-| `--agent NAME` | Agent name (default: hostname) |
-| `--claude` | Add the MCP server and SessionStart hook to Claude Code |
-| `--no-setup` | Install only |
-| `REF` (e.g. `bash -s -- v0.4.0`) | Install a branch, tag or commit |
+| `--peer [--token T]` / `-Peer [-Token T]` | Peer-to-peer; omit the token on the first machine |
+| `--relay` / `-Relay` | Make this machine the relay |
+| `--join URL --token T` / `-Join URL -Token T` | Connect to a relay |
+| `--agent NAME` / `-Agent NAME` | Agent name (default: hostname) |
+| `--claude` / `-Claude` | Add the MCP server and SessionStart hook to Claude Code |
+| `--no-setup` / `-NoSetup` | Install only |
+| `REF` / `-Version x.y.z` | A branch, tag or commit (macOS/Linux) or a release (Windows) |
 
-It installs a private Bun if needed (checksum-verified) into `~/.local/share/handover`, and a `handover` launcher in `~/.local/bin`.
+| | macOS / Linux | Windows |
+|---|---|---|
+| Installs | Source + a private Bun (checksum-verified) in `~/.local/share/handover`, launcher in `~/.local/bin` | `handover.exe` from the latest release (checked against `SHA256SUMS`) in `%LOCALAPPDATA%\handover\app`, added to your PATH |
+| Relay at login | launchd / systemd `--user` | Task Scheduler (hidden) |
+| Config | `~/.config/handover` | `%APPDATA%\handover` |
+
+⚠️ Windows: the first time the relay starts, Windows Firewall asks whether to allow `handover.exe`. Allow **private networks** so other machines can reach it.
 
 ## Commands
 
@@ -70,8 +69,9 @@ It installs a private Bun if needed (checksum-verified) into `~/.local/share/han
 | `handover wait --objective "…"` | Create a handover and block until it's done |
 | `handover worker --exec "claude -p"` | Auto-pickup: run an agent on each new handover |
 | `handover list` | Show the queue |
+| `handover link` | Print the connect commands for macOS/Linux and Windows |
 | `handover token` | Print the relay token / peer secret |
-| `handover service install\|uninstall\|restart\|status\|log` | Relay at login (launchd / systemd `--user`) |
+| `handover service install\|uninstall\|restart\|status\|log` | Relay at login (launchd / systemd `--user` / Task Scheduler) |
 | `handover doctor` | Check config, relay, peers, service, Claude Code |
 | `handover update [--check]` | Install the latest version from GitHub |
 
