@@ -95,20 +95,26 @@ export interface RelayConfig {
   tunnel?: Tunnel;
 }
 
+/** host: runs the relay others join. client: joins a host, never runs a relay (docs/flow.md). */
+export type Role = 'host' | 'client';
+
 /** ~/.config/handover/config.json */
 export interface Config {
-  /** Relay this machine talks to. */
+  role?: Role;
+  /** Relay this machine talks to: its own on a host; the host's on a client. */
   url?: string;
+  /** Client only: the URL came from discovery; find the host again when it stops answering. */
+  discover?: boolean;
   token?: string;
   /** This machine's agent name, used for targeting and leases. */
   agent?: string;
-  /** Set when this machine runs the relay (also in peer mode, where every machine runs one). */
+  /** Host only: relay settings. */
   relay?: RelayConfig;
-  /** Peer-to-peer on the local network: find other machines by mDNS instead of one relay URL. */
+  /** @deprecated v0.4–0.6 peer mode; read as host. */
   peer?: boolean;
 }
 
-/** A machine found on the network in peer mode. */
+/** A host found on the network. */
 export interface Peer {
   agent: string;
   url: string;

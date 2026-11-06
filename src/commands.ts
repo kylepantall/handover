@@ -7,7 +7,7 @@ import { format } from 'node:util';
 import path from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { RelayError } from './client.ts';
-import { agentName, DEFAULT_PORT, loadConfig, saveConfig } from './config.ts';
+import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
 import { connect } from './connect.ts';
 import { ensureLocalRelay, hostRelay, keepLocalRelay, stopHosting } from './host.ts';
 import type { Paths } from './paths.ts';
@@ -21,7 +21,7 @@ const log = (msg: string, ctx?: Record<string, unknown>) => console.error('[hand
 
 async function client(p: Paths) {
   const config = await loadConfig(p);
-  return { ...connect(config), peer: config.peer === true };
+  return { ...(await connect(p, config)), isHost: roleOf(config) === 'host' };
 }
 
 export interface ServeOptions {
@@ -54,13 +54,15 @@ export async function serve(p: Paths, o: ServeOptions): Promise<void> {
     teeConsole(o.log);
   }
   const config = await loadConfig(p);
+  if (roleOf(config) === 'client')
+    throw new Error('this machine is a client: it uses the host’s relay. Run handover host to make this machine the host.');
   const relay = config.relay ?? {};
   const port = o.port ?? relay.port ?? DEFAULT_PORT;
   let token = o.token ?? process.env.HANDOVER_TOKEN ?? config.token;
   if (!token) {
     // Keep the token stable across restarts so joined machines keep working.
     token = generateToken();
-    await saveConfig(p, { ...config, token, url: config.url ?? `http://127.0.0.1:${port}`, relay: { ...relay, port } });
+    await saveConfig(p, { ...config, role: 'host', token, url: config.url ?? `http://127.0.0.1:${port}`, relay: { ...relay, port } });
   }
   const tunnel = (o.tunnel ?? relay.tunnel) as Tunnel | undefined;
   if (tunnel && !TUNNELS.includes(tunnel)) throw new Error(`unknown tunnel "${tunnel}" (use ${TUNNELS.join(' or ')})`);
@@ -88,7 +90,7 @@ export async function serve(p: Paths, o: ServeOptions): Promise<void> {
 
   const urls = [`http://127.0.0.1:${port}`, ...lanAddresses().map((ip) => `http://${ip}:${port}`)];
   if (tunnel) urls.unshift((await startTunnel(tunnel, port)).url);
-  console.log(config.peer ? `Handover peer "${agentName(config)}" running (announced on this network)\n` : 'Handover relay running\n');
+  console.log(`Handover host "${agentName(config)}" running (announced on this network)\n`);
   console.log(`  data:   ${data === 'none' ? '(memory only)' : path.resolve(data)}`);
   for (const u of urls) console.log(`  url:    ${u}`);
   console.log(`\n  Token:  handover token   (stored in ${p.config})`);
@@ -123,7 +125,7 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
   const config = await loadConfig(p);
   // This machine's relay holds new tasks in relay and peer mode: host it here if nothing else is.
   await ensureLocalRelay(p, config);
-  const { api, agent, peer } = await client(p);
+  const { api, agent, isHost } = await client(p);
   const context = o.contextFile ? await fs.readFile(o.contextFile, 'utf8') : (o.context ?? '');
 
   let id = o.id;
@@ -132,7 +134,8 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
       .create({ id, objective: o.objective, context, from: agent, to: o.to, priority: o.priority })
       .catch((err: Error) => {
         // Peer mode keeps new tasks on this machine's own relay.
-        if (peer && !(err instanceof RelayError)) throw new Error('could not reach or host this machine’s relay: see handover doctor');
+        if (!(err instanceof RelayError))
+          throw new Error(isHost ? 'could not reach or start this host’s relay: see handover doctor' : 'could not reach the host: see handover doctor');
         throw err;
       });
     id = task.id;

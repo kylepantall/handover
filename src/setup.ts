@@ -1,48 +1,36 @@
 /**
- * `handover setup`: run the relay here or join one, name this agent, and wire
- * up Claude Code. Interactive on a terminal; flags make it scriptable.
+ * Setup, as specified in docs/flow.md: a machine is either the host (runs the
+ * relay, shares its token) or a client (asks for the token, finds the host,
+ * never runs a relay).
+ *
+ *   handover host            become the host; prints the token and join commands
+ *   handover join [URL]      join a host: token from a prompt or HANDOVER_TOKEN
+ *   handover setup           a menu offering the two
  */
 
 import * as ui from '@clack/prompts';
 import { existsSync } from 'node:fs';
-import { claudeRegistration, hookInstalled, installHook, registerWithClaude } from './claude.ts';
+import { claudeRegistration, installHook, registerWithClaude } from './claude.ts';
 import { probe } from './client.ts';
-import { agentName, DEFAULT_PORT, loadConfig, saveConfig } from './config.ts';
+import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
+import { findHost } from './discovery.ts';
 import { formatChecks, runChecks } from './doctor.ts';
-import type { Paths } from './paths.ts';
-import { PeerBrowser } from './discovery.ts';
 import { formatLink, linkInfo } from './link.ts';
+import type { Paths } from './paths.ts';
 import { generateToken } from './server.ts';
-import { installService, serviceByDefault, serviceSupported } from './service.ts';
+import { installService, serviceByDefault, serviceIsOurs, serviceState, serviceSupported, uninstallService } from './service.ts';
 import { validateAgent } from './store.ts';
 import { TUNNELS, type Config, type Tunnel } from './types.ts';
 
-export interface SetupOptions {
-  /** Run the relay on this machine. */
-  relay?: boolean;
-  /** Join the relay at this URL. */
-  join?: string;
-  /** Peer-to-peer on this network: every machine runs its own relay and peers find each other by mDNS. */
-  peer?: boolean;
-  token?: string;
-  port?: number;
-  tunnel?: Tunnel;
-  agent?: string;
-  /** Register the MCP server with Claude Code. */
-  claude?: boolean;
-  /** Add the SessionStart hook to Claude Code. */
-  hook?: boolean;
-  /** Start the relay at login (relay and peer mode; default yes where supported). */
-  service?: boolean;
-}
+type Say = (message: string) => void;
 
-function bail<T>(value: T): Exclude<T, symbol> {
+const cancelled = <T>(value: T): Exclude<T, symbol> => {
   if (ui.isCancel(value)) {
-    ui.cancel('Setup cancelled; nothing was saved.');
+    ui.cancel('Nothing changed.');
     process.exit(1);
   }
   return value as Exclude<T, symbol>;
-}
+};
 
 function validUrl(value: string | undefined): string | undefined {
   try {
@@ -71,204 +59,240 @@ async function waitForRelay(url: string, token: string, ms = 8000): Promise<bool
   return false;
 }
 
-/** Peers already on this network with the same secret (agent names). */
-async function findPeers(token: string, self: string): Promise<string[]> {
-  const browser = new PeerBrowser(token, { settleMs: 2500 });
-  await browser.ready;
-  const names = browser.peers().map((p) => p.agent).filter((a) => a !== self);
-  browser.stop();
-  return [...new Set(names)];
+/** MCP server + SessionStart hook, when the claude CLI is present (unless `claude` is false). */
+async function wireClaude(claude: boolean | undefined, say: Say): Promise<void> {
+  if (claude === false) return;
+  const state = await claudeRegistration();
+  if (state === 'no-claude') return;
+  if (state === 'registered') say('Claude Code: MCP server already registered');
+  else {
+    await registerWithClaude();
+    say('Claude Code: added the "handover" MCP server (start a new session to load it)');
+  }
+  if ((await installHook()) === 'added') say('Claude Code: pending handovers now show at session start');
 }
 
-const joinHint = (config: Config) => formatLink(linkInfo(config));
+// ── host ────────────────────────────────────────────────────────────────
 
-/** Applies a finished set of answers: config, service, Claude Code. */
-async function apply(p: Paths, config: Config, opts: SetupOptions, say: (msg: string) => void): Promise<void> {
+export interface HostOptions {
+  port?: number;
+  tunnel?: Tunnel;
+  agent?: string;
+  /** Login service: default on macOS/Linux, off on Windows (docs/flow.md). */
+  service?: boolean;
+  claude?: boolean;
+}
+
+/** Makes this machine the host and returns its config (printing the link is up to the caller). */
+export async function becomeHost(p: Paths, o: HostOptions, say: Say): Promise<Config> {
+  const existing = await loadConfig(p);
+  const wasHost = roleOf(existing) === 'host';
+  const port = o.port ?? existing.relay?.port ?? DEFAULT_PORT;
+  const config: Config = {
+    role: 'host',
+    agent: o.agent ?? agentName(existing),
+    // Keep the host's token across reruns; a former client gets its own.
+    token: process.env.HANDOVER_TOKEN || (wasHost ? existing.token : undefined) || generateToken(),
+    url: `http://127.0.0.1:${port}`,
+    relay: { ...(wasHost ? existing.relay : {}), port, ...(o.tunnel ? { tunnel: o.tunnel } : {}) },
+  };
+  validateAgent(config.agent, 'agent name');
   await saveConfig(p, config);
   say(`Saved ${p.config}`);
 
-  if (config.relay && opts.service) {
+  const existingService = await serviceState();
+  const foreignService = ['running', 'stopped'].includes(existingService) && !(await serviceIsOurs());
+  if (foreignService) {
+    say('A login service from another handover install exists; left alone');
+  } else if (o.service ?? serviceByDefault()) {
     try {
       await installService();
-      say((await waitForRelay(config.url!, config.token!)) ? 'Relay started and will run at login' : 'Relay service installed, but it is not answering yet (handover doctor)');
+      say((await waitForRelay(config.url!, config.token!)) ? 'Relay running; it starts at login' : 'Relay service installed but not answering yet (handover doctor)');
     } catch (err) {
       // Not fatal: the relay also runs inside Claude Code's MCP server, wait and worker.
-      say(`Could not install the login service (${(err as Error).message}); the relay will run while Claude Code or a handover command is open`);
+      say(`Could not install the login service (${(err as Error).message}); the relay runs while Claude Code or a handover command is open`);
+    }
+  } else {
+    say('The relay runs while Claude Code or a handover command is open (handover service install keeps it running)');
+  }
+  await wireClaude(o.claude, say);
+  return config;
+}
+
+export async function runHost(p: Paths, o: HostOptions): Promise<number> {
+  const config = await becomeHost(p, o, (m) => console.log(m));
+  console.log(`\n${formatLink(linkInfo(config))}`);
+  return 0;
+}
+
+// ── join ────────────────────────────────────────────────────────────────
+
+export interface JoinOptions {
+  /** Host URL; omit to find the host on this network. */
+  url?: string;
+  /** Normally from a prompt or HANDOVER_TOKEN (never argv); kept for old installer flags. */
+  token?: string;
+  agent?: string;
+  claude?: boolean;
+  /** Prompt for missing answers (a terminal) instead of failing. */
+  interactive?: boolean;
+}
+
+export const isRelayUrl = (s: string) => /^https?:\/\//i.test(s);
+
+/** Joins a host and returns the config. Throws with the reason on failure. */
+export async function becomeClient(p: Paths, o: JoinOptions, say: Say): Promise<Config> {
+  if (o.url && validUrl(o.url)) throw new Error(`not a host URL: ${o.url}`);
+  const existing = await loadConfig(p);
+
+  let token = o.token || process.env.HANDOVER_TOKEN || undefined;
+  if (!token) {
+    if (!o.interactive) throw new Error('no token: set HANDOVER_TOKEN, or run handover join in a terminal');
+    token = cancelled(
+      await ui.password({ message: 'Token from the host (handover link or handover token there)', validate: (v) => (v ? undefined : 'Required') })
+    );
+  }
+
+  let url = o.url?.replace(/\/+$/, '');
+  let discovered = false;
+  if (!url) {
+    const spin = o.interactive ? ui.spinner() : null;
+    spin?.start('Looking for the host on this network');
+    const host = await findHost(token, 4000);
+    spin?.stop(host ? `Found host ${host.agent} at ${host.url}` : 'No host found on this network');
+    if (host) {
+      url = host.url;
+      discovered = true;
+      if (!spin) say(`Found host ${host.agent} at ${host.url}`);
+    } else if (o.interactive) {
+      url = cancelled(
+        await ui.text({ message: 'Host URL (handover link on the host shows it)', placeholder: 'http://192.168.1.20:7777', validate: validUrl })
+      ).replace(/\/+$/, '');
+    } else {
+      throw new Error('no host found on this network. Is it running (handover doctor on the host)? Or give its URL: handover join http://HOST:7777');
     }
   }
-  if (opts.claude) {
-    if ((await claudeRegistration()) === 'registered') say('Claude Code: MCP server already registered');
-    else {
-      await registerWithClaude();
-      say('Claude Code: registered "handover" (user scope); start a new session to load it');
-    }
+
+  const state = await probe({ url, token });
+  if (state === 'unauthorized') throw new Error(`the host at ${url} rejected the token`);
+  // A Windows host runs its relay only while Claude Code or handover is open there.
+  if (state === 'unreachable') say(`Warning: the host at ${url} isn't answering right now; saved anyway`);
+
+  const config: Config = { role: 'client', url, discover: discovered, token, agent: o.agent ?? agentName(existing) };
+  validateAgent(config.agent, 'agent name');
+  await saveConfig(p, config);
+  say(`Saved ${p.config}`);
+
+  // A client never runs a relay: remove one this install set up as a host.
+  if (roleOf(existing) === 'host' && (await serviceIsOurs())) {
+    await uninstallService().catch(() => {});
+    say('Removed this machine’s relay service (clients use the host’s relay)');
   }
-  if (opts.hook) say((await installHook()) === 'added' ? 'Claude Code: SessionStart hook added' : 'Claude Code: SessionStart hook already present');
+  await wireClaude(o.claude, say);
+  return config;
+}
+
+export async function runJoin(p: Paths, o: Omit<JoinOptions, 'interactive'>): Promise<number> {
+  const interactive = process.stdin.isTTY === true && !(o.token || process.env.HANDOVER_TOKEN);
+  if (interactive) ui.intro('handover join');
+  const say: Say = interactive ? (m) => ui.log.success(m) : (m) => console.log(m);
+  const config = await becomeClient(p, { ...o, interactive }, say);
+  const done = `Joined the host at ${config.url}${config.discover ? ' (found on this network)' : ''} as ${config.agent}`;
+  if (interactive) ui.outro(done);
+  else console.log(done);
+  return 0;
+}
+
+// ── setup: menu + compatibility flags ───────────────────────────────────
+
+export interface SetupOptions {
+  /** Old flags (docs/flow.md, Compatibility). */
+  peer?: boolean;
+  relay?: boolean;
+  join?: string;
+  token?: string;
+  port?: number;
+  tunnel?: Tunnel;
+  agent?: string;
+  claude?: boolean;
+  hook?: boolean;
+  service?: boolean;
 }
 
 export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
   const existing = await loadConfig(p);
-  const scripted = opts.relay || opts.join || opts.peer;
 
-  // Only Claude Code wiring requested (e.g. installer --claude on an existing setup).
-  if (!scripted && (opts.claude || opts.hook) && existsSync(p.config)) {
-    await apply(p, existing, { claude: opts.claude, hook: opts.hook }, (m) => console.log(m));
+  // Old flags map onto the two roles.
+  if (opts.relay || (opts.peer && !(opts.token || process.env.HANDOVER_TOKEN)))
+    return runHost(p, { port: opts.port, tunnel: opts.tunnel, agent: opts.agent, service: opts.service, claude: opts.claude || undefined });
+  if (opts.join || opts.peer) return runJoin(p, { url: opts.join, token: opts.token, agent: opts.agent, claude: opts.claude || undefined });
+
+  // Only Claude Code wiring requested on an existing setup (installer --claude).
+  if ((opts.claude || opts.hook) && existsSync(p.config)) {
+    await wireClaude(true, (m) => console.log(m));
     return 0;
   }
 
-  if (scripted) {
-    if ([opts.relay, opts.join, opts.peer].filter(Boolean).length > 1) throw new Error('use one of --relay, --join or --peer');
-    const config: Config = { ...existing, agent: opts.agent ?? agentName(existing) };
-    validateAgent(config.agent, 'agent name');
-    // Prefer HANDOVER_TOKEN: a --token argument shows up in process lists and antivirus logs.
-    const token = opts.token ?? (process.env.HANDOVER_TOKEN || undefined);
-    if (opts.relay || opts.peer) {
-      const port = opts.port ?? existing.relay?.port ?? DEFAULT_PORT;
-      config.relay = { ...existing.relay, port, ...(opts.tunnel ? { tunnel: opts.tunnel } : {}) };
-      config.url = `http://127.0.0.1:${port}`;
-      // A relay token from a joined machine belongs to that relay, not to a new peer network.
-      const reusable = opts.peer ? existing.peer && existing.token : existing.relay && existing.token;
-      config.token = token ?? (reusable || generateToken());
-      if (opts.peer) config.peer = true;
-      else delete config.peer;
-    } else {
-      if (validUrl(opts.join)) throw new Error(`invalid --join URL: ${opts.join}`);
-      if (!token) throw new Error('--join needs a token: set HANDOVER_TOKEN (or pass --token)');
-      config.url = opts.join!.replace(/\/+$/, '');
-      config.token = token;
-      delete config.relay;
-      delete config.peer;
-      const state = await probe({ url: config.url, token: config.token });
-      if (state !== 'ok') console.warn(`warning: relay ${config.url} is ${state}; saved anyway`);
-    }
-    const runsRelay = Boolean(opts.relay || opts.peer);
-    await apply(p, config, { ...opts, service: runsRelay ? (opts.service ?? serviceByDefault()) : false }, (m) => console.log(m));
-    if (opts.peer) {
-      const found = await findPeers(config.token!, config.agent!);
-      console.log(found.length ? `Peers on this network: ${found.join(', ')}` : 'No other peers seen yet.');
-    }
-    if (runsRelay) console.log(`\n${joinHint(config)}`);
-    return 0;
-  }
-
-  if (!process.stdin.isTTY) throw new Error('setup needs a terminal, or flags: --peer | --relay | --join <url> --token <token>');
+  if (!process.stdin.isTTY) throw new Error('setup needs a terminal; or run handover host / handover join');
 
   ui.intro('handover setup');
-  const role = bail(
+  const role = cancelled(
     await ui.select({
-      message: 'How should this machine connect?',
-      initialValue: existing.peer || (!existing.url && !existing.relay) ? 'peer' : existing.relay ? 'relay' : 'join',
+      message: 'What should this machine be?',
+      initialValue: roleOf(existing) ?? 'host',
       options: [
-        { value: 'peer', label: 'Peer-to-peer on this network', hint: 'fastest: no addresses, just a shared secret' },
-        { value: 'relay', label: 'Run a relay here', hint: 'one hub; works across networks with a tunnel' },
-        { value: 'join', label: 'Connect to a relay on another machine' },
+        { value: 'host', label: 'Host', hint: 'runs the relay; other machines join it with its token' },
+        { value: 'client', label: 'Join a host', hint: 'asks for the host’s token and finds it on this network' },
       ],
     })
   );
+  const step: Say = (m) => ui.log.success(m);
+  const agent = cancelled(await ui.text({ message: 'Name for this machine’s agent', initialValue: agentName(existing), validate: validAgent }));
 
-  const config: Config = { ...existing };
-  const choices: SetupOptions = {};
-  if (role === 'peer') {
-    const first = bail(
-      await ui.select({
-        message: 'Shared secret',
-        initialValue: existing.peer && existing.token ? 'keep' : 'new',
-        options: [
-          ...(existing.peer && existing.token ? [{ value: 'keep', label: 'Keep the current secret' }] : []),
-          { value: 'new', label: 'This is the first machine: create a secret' },
-          { value: 'enter', label: 'Join other peers: enter their secret', hint: 'handover token on a peer prints it' },
-        ],
+  if (role === 'client') {
+    const config = await becomeClient(p, { agent, interactive: true }, step);
+    ui.outro(`Joined the host at ${config.url} as ${config.agent}`);
+    return 0;
+  }
+
+  const port = Number(
+    cancelled(
+      await ui.text({
+        message: 'Port',
+        initialValue: String(existing.relay?.port ?? DEFAULT_PORT),
+        validate: (v) => (/^\d{2,5}$/.test(v ?? '') && Number(v) < 65536 ? undefined : 'Enter a port number'),
       })
-    );
-    if (first === 'new') config.token = generateToken();
-    else if (first === 'enter') config.token = bail(await ui.password({ message: 'Secret', validate: (v) => (v ? undefined : 'Required') }));
-    config.peer = true;
-    config.relay = { ...existing.relay, port: existing.relay?.port ?? DEFAULT_PORT };
-    config.url = `http://127.0.0.1:${config.relay.port}`;
-    if (first === 'enter') {
-      const s = ui.spinner();
-      s.start('Looking for peers with this secret');
-      const found = await findPeers(config.token!, agentName(existing));
-      s.stop(found.length ? `Found: ${found.join(', ')}` : 'No peers seen yet (they may be off); continuing');
-    }
-    choices.service = serviceSupported()
-      ? bail(
-          await ui.confirm({
-            message: 'Also run this machine’s relay at every login? (Otherwise it runs while Claude Code or a handover command is open.)',
-            initialValue: serviceByDefault(),
-          })
-        )
-      : false;
-  } else if (role === 'relay') {
-    const port = Number(
-      bail(
-        await ui.text({
-          message: 'Port',
-          initialValue: String(existing.relay?.port ?? DEFAULT_PORT),
-          validate: (v) => (/^\d{2,5}$/.test(v ?? '') && Number(v) < 65536 ? undefined : 'Enter a port number'),
+    )
+  );
+  const installed = TUNNELS.filter((t) => Bun.which(t));
+  const tunnel = installed.length
+    ? cancelled(
+        await ui.select<Tunnel | 'none'>({
+          message: 'Let machines on other networks join?',
+          initialValue: existing.relay?.tunnel ?? 'none',
+          options: [
+            { value: 'none', label: 'No, this network only' },
+            ...installed.map((t) => ({
+              value: t,
+              label: t === 'tailscale' ? 'Yes, via Tailscale Funnel' : 'Yes, via a Cloudflare quick tunnel',
+              hint: t === 'tailscale' ? 'stable URL' : 'new URL each restart',
+            })),
+          ],
         })
       )
-    );
-    const installed = TUNNELS.filter((t) => Bun.which(t));
-    const tunnel = bail(
-      await ui.select<Tunnel | 'none'>({
-        message: 'Reach it from outside your network?',
-        initialValue: existing.relay?.tunnel ?? 'none',
-        options: [
-          { value: 'none', label: 'No, same network only' },
-          ...installed.map((t) => ({
-            value: t,
-            label: t === 'tailscale' ? 'Tailscale Funnel' : 'Cloudflare quick tunnel',
-            hint: t === 'tailscale' ? 'stable URL' : 'new URL each restart',
-          })),
-        ],
-      })
-    );
-    config.relay = { ...existing.relay, port };
-    if (tunnel === 'none') delete config.relay.tunnel;
-    else config.relay.tunnel = tunnel;
-    config.url = `http://127.0.0.1:${port}`;
-    config.token = (existing.relay && !existing.peer && existing.token) || generateToken();
-    delete config.peer;
-    if (serviceSupported())
-      choices.service = bail(
+    : 'none';
+  const service = serviceSupported()
+    ? cancelled(
         await ui.confirm({
-          message: 'Run the relay at every login? (Otherwise it runs while Claude Code or a handover command is open.)',
-          initialValue: serviceByDefault(),
+          message: 'Keep the relay running at every login? (Otherwise it runs while Claude Code or a handover command is open.)',
+          initialValue: serviceByDefault() || (await serviceState()) === 'running',
         })
-      );
-  } else {
-    config.url = bail(
-      await ui.text({ message: 'Relay URL', placeholder: 'http://192.168.1.20:7777', initialValue: existing.relay ? '' : existing.url, validate: validUrl })
-    ).replace(/\/+$/, '');
-    config.token = bail(await ui.password({ message: 'Relay token (printed by setup on the relay machine)', validate: (v) => (v ? undefined : 'Required') }));
-    delete config.relay;
-    delete config.peer;
-    const s = ui.spinner();
-    s.start('Checking the relay');
-    const state = await probe({ url: config.url, token: config.token });
-    s.stop(state === 'ok' ? 'Relay reachable, token accepted' : `Relay is ${state}`);
-    if (state !== 'ok' && !bail(await ui.confirm({ message: 'Save anyway?', initialValue: false }))) {
-      ui.cancel('Nothing saved.');
-      return 1;
-    }
-  }
+      )
+    : false;
 
-  config.agent = bail(
-    await ui.text({ message: 'Name for this machine’s agent (used to address tasks to it)', initialValue: agentName(existing), validate: validAgent })
-  );
-
-  const claude = await claudeRegistration();
-  if (claude !== 'no-claude') {
-    choices.claude =
-      claude === 'registered' || bail(await ui.confirm({ message: 'Add the handover MCP server to Claude Code?', initialValue: true }));
-    if (!(await hookInstalled().catch(() => false)))
-      choices.hook = bail(await ui.confirm({ message: 'Show pending handovers when a Claude Code session starts?', initialValue: true }));
-  }
-
-  await apply(p, config, choices, (m) => ui.log.success(m));
-  if (role !== 'join') ui.note(joinHint(config), 'Connect other machines');
+  const config = await becomeHost(p, { agent, port, tunnel: tunnel === 'none' ? undefined : tunnel, service }, step);
+  ui.note(formatLink(linkInfo(config)), 'Share with the machines that should join');
   ui.note(formatChecks(await runChecks(p, { offline: true })), 'handover doctor');
-  ui.outro('Done. Hand something over: handover wait --objective "…"');
+  ui.outro('This machine is the host.');
   return 0;
 }

@@ -5,7 +5,7 @@
 Hand a task from one machine to an AI agent on another, and get the result back automatically. One side runs `handover wait`; an agent (Claude, ChatGPT, Cursor…) picks it up over MCP and calls `handover_complete`; the waiter exits with the output and files.
 
 ```
- Machine A                    Relay (LAN or tunnel)              Machine B
+ Client                       Host (relay, LAN or tunnel)        Any machine's agent
  handover wait ──create──▶  queue {id, objective, context}  ◀── agent: handover_next
       ▲  (blocks)                                           ◀── agent: handover_complete(output, files)
       └──────── exit 0, files in ./handover-<id>/
@@ -13,50 +13,46 @@ Hand a task from one machine to an AI agent on another, and get the result back 
 
 ## Install
 
-One command per machine, on macOS, Linux or Windows 11. Pick a mode:
+One machine is the **host**: it runs the relay and shares a token. Every other machine is a **client**: it joins with that token and finds the host on your network by itself. Full spec: [docs/flow.md](docs/flow.md).
 
-| Mode | Best for | Setup |
-|---|---|---|
-| **Peer-to-peer** | Machines on the same network | One shared secret; peers find each other (mDNS). No addresses |
-| **Relay** | Different networks, or one always-on hub | One machine runs the relay; others join it by URL + token |
-
-### Peer-to-peer (fastest)
-
-First machine:
+**1. Host** (once):
 
 | OS | Command |
 |---|---|
-| macOS / Linux | `curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh \| bash -s -- --peer --claude` |
-| Windows (PowerShell) | `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Peer -Claude` |
+| macOS / Linux | `curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh \| bash -s -- --host` |
+| Windows (PowerShell) | `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Host` |
 
-Then run **`handover link`** on it: it prints the exact command for every other machine, macOS/Linux and Windows, with the secret filled in.
+It prints the token and the exact join commands. Print them again any time with `handover link` on the host.
 
-Each machine runs a small relay holding the tasks it creates (inside handover while Claude Code or a handover command is open, or as a login service), and announces itself on the network. Agents see and work on tasks from every peer.
-
-### Relay
+**2. Each client:** paste the command `handover link` printed (it carries the token in `HANDOVER_TOKEN`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.sh | HANDOVER_TOKEN=<token> bash -s -- --join
 ```
 
-Choose "Run a relay here" (Windows: the `install.ps1` command above with `-Relay`). `handover link` prints the join commands for other machines.
+```powershell
+$env:HANDOVER_TOKEN='<token>'; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Join
+```
 
-Running the installer with no options starts the guided `handover setup`, which offers all three choices.
+Without `HANDOVER_TOKEN` it asks for the token. Already installed? `handover join`.
 
 | Installer option (`install.sh` / `install.ps1`) | Does |
 |---|---|
-| `--peer` / `-Peer` | Peer-to-peer. Other machines get the secret via `HANDOVER_TOKEN` (`handover link` prints the full command) |
-| `--relay` / `-Relay` | Make this machine the relay |
-| `--join URL` / `-Join URL` | Connect to a relay (token in `HANDOVER_TOKEN`) |
+| `--host` / `-Host` | This machine is the host |
+| `--join [URL]` / `-Join [-Url URL]` | Join a host. The URL is only needed when the host is on another network |
 | `--agent NAME` / `-Agent NAME` | Agent name (default: hostname) |
-| `--claude` / `-Claude` | Add the MCP server and SessionStart hook to Claude Code |
+| `--no-claude` / `-NoClaude` | Don't add the MCP server and hook to Claude Code (added by default when it's installed) |
+| `--no-service` | Host: don't run the relay at login (it runs while Claude Code is open) |
 | `--no-setup` / `-NoSetup` | Install only |
 | `REF` / `-Version x.y.z` | A branch, tag or commit (macOS/Linux) or a release (Windows) |
+
+No option: a menu asks host or join. Old `--peer` / `--relay` flags still work (see docs/flow.md).
 
 | | macOS / Linux | Windows |
 |---|---|---|
 | Installs | Source + a private Bun (checksum-verified) in `~/.local/share/handover`, launcher in `~/.local/bin` | `handover.exe` from the latest release (checked against `SHA256SUMS`) in `%LOCALAPPDATA%\handover\app`, added to your PATH |
-| Relay | Login service by default (launchd / systemd `--user`) | Runs inside handover while Claude Code (or `wait` / `worker`) is open; login task is opt-in (`handover service install`) |
+| Host relay | Login service by default (launchd / systemd `--user`) | Runs inside handover while Claude Code (or `wait` / `worker`) is open; login task is opt-in (`handover service install`) |
+| Client | Never runs a relay | Never runs a relay |
 | Config | `~/.config/handover` | `%APPDATA%\handover` |
 
 ⚠️ Windows: the first time the relay starts, Windows Firewall asks whether to allow `handover.exe`. Allow **private networks** so other machines can reach it. If antivirus flags it, see [docs/antivirus.md](docs/antivirus.md); releases are signed once [docs/signing.md](docs/signing.md) is set up.
@@ -76,15 +72,16 @@ Keep the config and queue (to reinstall with the same secret): add `-s -- --keep
 
 | Command | Does |
 |---|---|
-| `handover setup` | Guided setup; rerun any time |
+| `handover host` | Make this machine the host; prints the token and join commands |
+| `handover join [HOST_URL]` | Join a host: asks for its token and finds it on this network |
+| `handover setup` | Menu: host or join |
 | `handover wait --objective "…"` | Create a handover and block until it's done |
 | `handover worker --exec "claude -p"` | Auto-pickup: run an agent on each new handover |
 | `handover list` | Show the queue |
-| `handover link` | Print the connect commands for macOS/Linux and Windows |
-| `handover join [RELAY_URL]` | Already installed: join peers on this network (or a relay); asks for the secret |
-| `handover token` | Print the relay token / peer secret |
+| `handover link` | Host: print the token and join commands (macOS/Linux and Windows) |
+| `handover token` | Print this machine's token |
 | `handover service install\|uninstall\|restart\|status\|log` | Relay at login (launchd / systemd `--user` / Task Scheduler) |
-| `handover doctor` | Check config, relay, peers, service, Claude Code |
+| `handover doctor` | Host: relay and service. Client: host found and token accepted |
 | `handover update [--check]` | Install the latest version from GitHub |
 
 ### `wait`
@@ -121,7 +118,7 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 |---|---|
 | Claude Code | `handover setup` (or `--claude`) registers `handover mcp` |
 | Claude Desktop / Cursor (stdio) | `{"command": "~/.local/bin/handover", "args": ["mcp"]}` |
-| Any HTTP MCP client | `<relay>/mcp` (in peer mode: that one peer's tasks) with `Authorization: Bearer <token>` and `X-Handover-Agent: <name>` |
+| Any HTTP MCP client | `<host>/mcp` with `Authorization: Bearer <token>` and `X-Handover-Agent: <name>` |
 | ChatGPT (developer mode) | Needs HTTPS: set a tunnel in setup, then `<tunnel-url>/mcp?token=<token>&agent=<name>`, "No authentication" |
 
 ### Tools
@@ -150,7 +147,7 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 - `?token=` in a URL may be logged by tunnel providers; prefer header auth where the client supports it.
 - Task context from another machine is untrusted input to your agent (prompt injection).
 - Agent names are self-declared: targeting routes work, it isn't access control.
-- Peer mode announces each machine's agent name and a one-way network id on the LAN; the secret itself is never broadcast.
+- The host announces its agent name and a one-way network id on the LAN so clients can find it; the token itself is never broadcast.
 - Received files are flat names only (no paths/dotfiles), max 25 MB per request.
 
 ## Development

@@ -1,109 +1,185 @@
+/**
+ * The host / client flow (docs/flow.md). Every run hides the `claude` CLI and
+ * hosts use --no-service, so tests never touch the developer's real Claude
+ * Code config or login service.
+ */
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hookInstalled, installHook } from '../src/claude.ts';
-import { loadConfig } from '../src/config.ts';
+import { hookInstalled, installHook, removeHook } from '../src/claude.ts';
+import { loadConfig, roleOf } from '../src/config.ts';
 import { paths } from '../src/paths.ts';
-import { runSetup } from '../src/setup.ts';
 import { startServer } from '../src/server.ts';
 
 const CLI = fileURLToPath(new URL('../src/index.ts', import.meta.url));
 let dir: string;
+const spawned: ChildProcess[] = [];
 
 beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'handover-setup-'));
 });
 afterEach(async () => {
+  for (const c of spawned.splice(0)) c.kill();
+  await Bun.sleep(100);
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-function cli(args: string[], extraEnv: Record<string, string> = {}) {
+const freePort = () =>
+  new Promise<number>((resolve) => {
+    const s = createServer().listen(0, '127.0.0.1', () => {
+      const p = (s.address() as { port: number }).port;
+      s.close(() => resolve(p));
+    });
+  });
+
+/** Runs the CLI with no `claude` on PATH and a private HANDOVER_HOME. */
+function start(args: string[], env: Record<string, string> = {}, home = dir) {
   const { HANDOVER_URL: _u, HANDOVER_TOKEN: _t, HANDOVER_AGENT: _a, ...base } = process.env;
-  const child = spawn(process.execPath, [CLI, ...args], { env: { ...base, HANDOVER_HOME: dir, ...extraEnv } });
-  let stdout = '';
-  child.stdout.on('data', (d) => (stdout += d));
-  child.stderr.on('data', (d) => (stdout += d));
-  return new Promise<{ code: number; stdout: string }>((r) => child.on('close', (code) => r({ code: code ?? -1, stdout })));
+  const child = spawn(process.execPath, [CLI, ...args], {
+    env: { ...base, PATH: path.dirname(process.execPath), HANDOVER_HOME: home, ...env },
+  });
+  spawned.push(child);
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  const done = new Promise<{ code: number; out: string }>((r) => child.on('close', (code) => r({ code: code ?? -1, out })));
+  return { child, done, out: () => out };
+}
+const cli = (args: string[], env: Record<string, string> = {}, home = dir) => start(args, env, home).done;
+const config = (home = dir) => loadConfig(paths(home));
+
+async function relay(token: string) {
+  const { server } = await startServer({ port: 0, host: '127.0.0.1', token });
+  const addr = server.address();
+  return { server, url: `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}` };
 }
 
-test('scripted relay setup writes a private config with a token', async () => {
-  const p = paths(dir);
-  const log = console.log;
-  console.log = () => {};
-  try {
-    expect(await runSetup(p, { relay: true, port: 7999, agent: 'box', service: false })).toBe(0);
-  } finally {
-    console.log = log;
-  }
-  const config = await loadConfig(p);
-  expect(config.relay?.port).toBe(7999);
-  expect(config.url).toBe('http://127.0.0.1:7999');
-  expect(config.agent).toBe('box');
-  expect(config.token?.length).toBeGreaterThanOrEqual(32);
-  if (process.platform !== 'win32') expect((await fs.stat(p.config)).mode & 0o777).toBe(0o600);
+// ── host ──
 
-  // Rerunning keeps the token, so joined machines keep working.
-  console.log = () => {};
-  try {
-    await runSetup(p, { relay: true, service: false });
-  } finally {
-    console.log = log;
-  }
-  expect((await loadConfig(p)).token).toBe(config.token!);
+test('host: saves the host role and a token, prints the token and join commands', async () => {
+  const { code, out } = await cli(['host', '--agent', 'box', '--port', '7999', '--no-service']);
+  expect(code).toBe(0);
+  const c = await config();
+  expect(c).toMatchObject({ role: 'host', agent: 'box', url: 'http://127.0.0.1:7999', relay: { port: 7999 } });
+  expect(c.token!.length).toBeGreaterThanOrEqual(32);
+  expect(out).toContain(`Token: ${c.token}`);
+  expect(out).toContain(`HANDOVER_TOKEN=${c.token} bash -s -- --join`);
+  expect(out).toContain(`$env:HANDOVER_TOKEN='${c.token}'`);
+  expect(out).toContain('handover join');
+  if (process.platform !== 'win32') expect((await fs.stat(paths(dir).config)).mode & 0o777).toBe(0o600);
+
+  await cli(['host', '--no-service']);
+  expect((await config()).token).toBe(c.token!); // rerun keeps the token, so clients keep working
 });
 
-test('scripted join checks the relay and stores url, token and agent', async () => {
-  const { server } = await startServer({ port: 0, host: '127.0.0.1', token: 'secret' });
-  const addr = server.address();
-  const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
-  try {
-    const { code, stdout } = await cli(['setup', '--join', url, '--token', 'secret', '--agent', 'laptop']);
-    expect(code).toBe(0);
-    expect(stdout).not.toContain('warning');
-    const config = await loadConfig(paths(dir));
-    expect(config).toMatchObject({ url, token: 'secret', agent: 'laptop' });
-    expect(config.relay).toBeUndefined();
+test('host: a former client gets its own token, not the one it joined with', async () => {
+  await fs.writeFile(paths(dir).config, JSON.stringify({ role: 'client', url: 'http://10.0.0.5:7777', token: 'joined-token' }));
+  expect((await cli(['host', '--no-service'])).code).toBe(0);
+  const c = await config();
+  expect(c.role).toBe('host');
+  expect(c.token).not.toBe('joined-token');
+  expect(c.discover).toBeUndefined();
+});
 
-    // The CLI now reaches the relay from config alone.
-    expect((await cli(['list'])).code).toBe(0);
+// ── join ──
+
+test('join URL: asks nothing else, saves the client role, never a relay', async () => {
+  const { server, url } = await relay('host-token');
+  try {
+    const { code, out } = await cli(['join', url, '--agent', 'laptop'], { HANDOVER_TOKEN: 'host-token' });
+    expect(code).toBe(0);
+    expect(out).toContain(`Joined the host at ${url}`);
+    expect(out).not.toContain('HANDOVER_TOKEN='); // a client shares nothing
+    const c = await config();
+    expect(c).toMatchObject({ role: 'client', url, discover: false, token: 'host-token', agent: 'laptop' });
+    expect(c.relay).toBeUndefined();
   } finally {
     server.close();
   }
 });
 
-test('scripted peer setup: new secret, kept on rerun, never reuses a joined relay token', async () => {
-  const p = paths(dir);
-  await fs.writeFile(p.config, JSON.stringify({ url: 'http://10.0.0.5:7777', token: 'relay-token' }));
-  const quiet = async (fn: () => Promise<unknown>) => {
-    const log = console.log;
-    console.log = () => {};
-    try {
-      await fn();
-    } finally {
-      console.log = log;
-    }
-  };
-  await quiet(() => runSetup(p, { peer: true, agent: 'desk', service: false }));
-  const first = await loadConfig(p);
-  expect(first.peer).toBe(true);
-  expect(first.token).not.toBe('relay-token');
-  expect(first.url).toBe('http://127.0.0.1:7777');
-
-  await quiet(() => runSetup(p, { peer: true, service: false }));
-  expect((await loadConfig(p)).token).toBe(first.token!);
-
-  await quiet(() => runSetup(p, { peer: true, token: 'shared', service: false }));
-  expect((await loadConfig(p)).token).toBe('shared');
-}, 20_000); // each peer setup scans the network for a few seconds
-
-test('join rejects a bad URL and a missing token', async () => {
-  expect((await cli(['setup', '--join', 'not a url', '--token', 'x'])).code).toBe(1);
-  expect((await cli(['setup', '--join', 'http://127.0.0.1:1'])).code).toBe(1);
+test('join: a wrong token is rejected and nothing is saved', async () => {
+  const { server, url } = await relay('host-token');
+  try {
+    const { code, out } = await cli(['join', url], { HANDOVER_TOKEN: 'wrong' });
+    expect(code).toBe(1);
+    expect(out).toContain('rejected the token');
+    expect(existsSync(paths(dir).config)).toBe(false);
+  } finally {
+    server.close();
+  }
 });
+
+test('join: the token never comes from the command line', async () => {
+  const onArgv = await cli(['join', 'my-secret-value']);
+  expect(onArgv.code).toBe(1);
+  expect(onArgv.out).toContain('HANDOVER_TOKEN');
+  expect(onArgv.out).not.toContain('my-secret-value');
+  const none = await cli(['join']); // not a terminal, no env
+  expect(none.code).toBe(1);
+  expect(existsSync(paths(dir).config)).toBe(false);
+}, 15_000);
+
+test('join with no URL finds the host on this network (real mDNS)', async () => {
+  const hostHome = path.join(dir, 'host');
+  const clientHome = path.join(dir, 'client');
+  const port = await freePort();
+  expect((await cli(['host', '--agent', 'hub', '--port', String(port), '--no-service'], {}, hostHome)).code).toBe(0);
+  const { token } = await config(hostHome);
+  const host = start(['serve'], {}, hostHome); // announces itself as a host
+  for (let i = 0; i < 50 && !host.out().includes('running'); i++) await Bun.sleep(100);
+
+  const { code, out } = await cli(['join', '--agent', 'laptop'], { HANDOVER_TOKEN: token! }, clientHome);
+  expect(code).toBe(0);
+  expect(out).toContain('Found host hub');
+  const c = await config(clientHome);
+  expect(c).toMatchObject({ role: 'client', discover: true, token });
+  expect(c.url).toEndWith(`:${port}`);
+  // The client works against the host it found.
+  expect((await cli(['list'], {}, clientHome)).code).toBe(0);
+}, 30_000);
+
+test('a client never runs a relay and has nothing to share', async () => {
+  await fs.writeFile(paths(dir).config, JSON.stringify({ role: 'client', url: 'http://10.0.0.5:7777', token: 't' }));
+  const serve = await cli(['serve']);
+  expect(serve.code).toBe(1);
+  expect(serve.out).toContain('client');
+  const link = await cli(['link']);
+  expect(link.code).toBe(1);
+  expect(link.out).toContain('run handover link on the host');
+});
+
+// ── old flags (docs/flow.md, Compatibility) ──
+
+test('old flags map onto host and join', async () => {
+  expect((await cli(['setup', '--relay', '--no-service'])).code).toBe(0);
+  expect((await config()).role).toBe('host');
+  await fs.rm(paths(dir).config);
+  expect((await cli(['setup', '--peer', '--no-service'])).code).toBe(0); // first machine: host
+  expect((await config()).role).toBe('host');
+
+  const { server, url } = await relay('host-token');
+  try {
+    expect((await cli(['setup', '--join', url], { HANDOVER_TOKEN: 'host-token' })).code).toBe(0);
+    expect(await config()).toMatchObject({ role: 'client', url });
+  } finally {
+    server.close();
+  }
+});
+
+test('pre-0.7 configs keep their role: relay/peer → host, joined url → client', () => {
+  expect(roleOf({ relay: { port: 1 } })).toBe('host');
+  expect(roleOf({ peer: true })).toBe('host');
+  expect(roleOf({ url: 'http://x:1', token: 't' })).toBe('client');
+  expect(roleOf({})).toBeUndefined();
+});
+
+// ── Claude Code hook ──
 
 test('installHook adds the SessionStart hook once and keeps other settings', async () => {
   const file = path.join(dir, 'settings.json');
@@ -118,15 +194,7 @@ test('installHook adds the SessionStart hook once and keeps other settings', asy
   expect(settings.hooks.SessionStart[0].hooks[0].command).toMatch(/ hook$/);
 });
 
-test('--version and token work from config', async () => {
-  expect((await cli(['--version'])).stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
-  expect((await cli(['token'])).code).toBe(1);
-  await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ token: 'abc' }));
-  expect((await cli(['token'])).stdout.trim()).toBe('abc');
-});
-
 test('removeHook takes out only this install’s hook and tidies empty sections', async () => {
-  const { installHook, removeHook } = await import('../src/claude.ts');
   const file = path.join(dir, 'settings.json');
   const other = { hooks: [{ type: 'command', command: '/somewhere/else/handover hook' }] };
   await fs.writeFile(file, JSON.stringify({ model: 'opus', hooks: { SessionStart: [other], Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } }));
@@ -140,42 +208,11 @@ test('removeHook takes out only this install’s hook and tidies empty sections'
   expect(settings.model).toBe('opus');
   expect(settings.hooks.SessionStart).toBeUndefined();
   expect(settings.hooks.Stop).toHaveLength(1);
-  expect(await removeHook(file)).toBe(0);
 });
 
-// join: run with no `claude` on PATH and --no-service, so tests never touch the
-// developer's real Claude Code config or login service.
-const isolated = (env: Record<string, string> = {}) => ({ PATH: path.dirname(process.execPath), ...env });
-
-test('join (no URL) joins peers with the secret from HANDOVER_TOKEN', async () => {
-  const { code, stdout } = await cli(['join', '--agent', 'pc', '--no-service'], isolated({ HANDOVER_TOKEN: 'peer-secret' }));
-  expect(code).toBe(0);
-  expect(stdout).toContain('handover join');
-  const config = await loadConfig(paths(dir));
-  expect(config).toMatchObject({ peer: true, token: 'peer-secret', agent: 'pc' });
-}, 20_000);
-
-test('join URL joins that relay', async () => {
-  const { server } = await startServer({ port: 0, host: '127.0.0.1', token: 'relay-secret' });
-  const addr = server.address();
-  const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
-  try {
-    const { code } = await cli(['join', url, '--no-service'], isolated({ HANDOVER_TOKEN: 'relay-secret' }));
-    expect(code).toBe(0);
-    const config = await loadConfig(paths(dir));
-    expect(config).toMatchObject({ url, token: 'relay-secret' });
-    expect(config.peer).toBeUndefined();
-  } finally {
-    server.close();
-  }
-});
-
-test('join refuses a secret on the command line and needs one from somewhere', async () => {
-  const onArgv = await cli(['join', 'my-secret-value', '--no-service'], isolated());
-  expect(onArgv.code).toBe(1);
-  expect(onArgv.stdout).toContain('HANDOVER_TOKEN');
-  expect(onArgv.stdout).not.toContain('my-secret-value');
-  const none = await cli(['join', '--no-service'], isolated()); // not a terminal, no env
-  expect(none.code).toBe(1);
-  expect(existsSync(paths(dir).config)).toBe(false);
+test('--version and token work from config', async () => {
+  expect((await cli(['--version'])).out.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+  expect((await cli(['token'])).code).toBe(1);
+  await fs.writeFile(paths(dir).config, JSON.stringify({ token: 'abc' }));
+  expect((await cli(['token'])).out.trim()).toBe('abc');
 });

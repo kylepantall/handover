@@ -29,46 +29,58 @@ usage() {
 Usage: bash install.sh [options] [REF]
 
 Installs $HANDOVER_REPO (branch, tag or commit; default main) under
-~/.local/share/handover with a launcher in ~/.local/bin, then runs setup.
+~/.local/share/handover with a launcher in ~/.local/bin, then sets it up.
 
-  --peer                  Peer-to-peer on this network (no questions). Other machines: set
-                          HANDOVER_TOKEN to the secret (handover link prints the command)
-  --relay                 Make this machine the relay (no questions)
-  --join URL              Connect this machine to a relay (token in HANDOVER_TOKEN)
+  --host                  Make this machine the host: prints the token and join commands
+  --join [URL]            Join a host. Token in HANDOVER_TOKEN (handover link on the host prints
+                          the whole command), otherwise asked for. Finds the host on this
+                          network; URL only if it's elsewhere
   --agent NAME            Agent name for this machine (default: hostname)
-  --claude                Register the MCP server and SessionStart hook with Claude Code
+  --no-claude             Don't add handover to Claude Code (added by default when installed)
+  --no-service            Host: don't start the relay at login (it runs while Claude Code is open)
   --no-setup              Install only; run "handover setup" later
 
+No option: a menu asks host or join. See docs/flow.md.
 Override with HANDOVER_INSTALL_DIR, HANDOVER_BIN_DIR, HANDOVER_REPO and HANDOVER_SOURCE_DIR.
 EOF
 }
 
 main() {
-  local ref='main' run_setup=true has_mode=false claude=false
-  local -a setup_args=()
+  local ref='main' run_setup=true mode='' join_url='' claude=false
+  local -a role_args=() host_args=()
   while (($#)); do
     case "$1" in
       --help | -h) usage; return ;;
       --no-setup) run_setup=false ;;
-      --relay | --peer) setup_args+=("$1"); has_mode=true ;;
-      --claude) setup_args+=(--claude --hook); claude=true ;;
+      --host | --relay) mode=host ;;
+      --join)
+        mode=join
+        if [[ $# -ge 2 && "$2" =~ ^https?:// ]]; then join_url="$2"; shift; fi
+        ;;
+      # Old flag: the first machine (no token) hosts; with a token it joins.
+      --peer) mode=peer ;;
       --token)
-        # Kept for old links; hand it to setup through the environment, not argv.
+        # Old links; hand it over through the environment, never argv.
         [[ $# -ge 2 ]] || { printf '%s needs a value.\n' "$1" >&2; return 1; }
         export HANDOVER_TOKEN="$2"
         shift
         ;;
-      --join | --agent)
+      --agent)
         [[ $# -ge 2 ]] || { printf '%s needs a value.\n' "$1" >&2; return 1; }
-        [[ "$1" != --join ]] || has_mode=true
-        setup_args+=("$1" "$2")
+        role_args+=(--agent "$2")
         shift
         ;;
+      --claude) claude=true ;; # default now; kept for old links
+      --no-claude) role_args+=(--no-claude) ;;
+      --no-service) host_args+=(--no-service) ;;
       -*) printf 'Unknown option: %s\n' "$1" >&2; return 1 ;;
       *) ref="$1" ;;
     esac
     shift
   done
+  if [[ "$mode" == peer ]]; then
+    if [[ -n "${HANDOVER_TOKEN:-}" ]]; then mode=join; else mode=host; fi
+  fi
   if [[ ! "$ref" =~ ^[A-Za-z0-9._/-]+$ || "$ref" == *..* || "$ref" == /* || "$ref" == */ ]]; then
     printf 'Invalid ref: %s\n' "$ref" >&2
     return 1
@@ -178,34 +190,55 @@ main() {
     *) printf '\nAdd %s to your PATH to run handover from a terminal.\n' "$bin_dir" ;;
   esac
 
-  # A running relay keeps the old code until it restarts.
-  if [[ "$("$bin_dir/handover" service status 2>/dev/null)" == running ]]; then
+  # A running relay keeps the old code until it restarts. The service name is
+  # machine-wide, so only restart one that runs this install's launcher.
+  local plist="$HOME/Library/LaunchAgents/com.kylepantall.handover.plist"
+  local unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/handover.service"
+  if grep -qsF "$bin_dir/handover" "$plist" "$unit" 2>/dev/null &&
+    [[ "$("$bin_dir/handover" service status 2>/dev/null)" == running ]]; then
     step 'Restarting the relay service'
     quiet "$bin_dir/handover" service restart && info 'Done'
   fi
 
-  [[ "$run_setup" == true ]] || { printf '\nhandover installed. Next: handover setup\n'; return; }
+  [[ "$run_setup" == true ]] || { printf '\nhandover installed. Next: handover host, or handover join\n'; return; }
 
   local data_dir="${HANDOVER_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/handover}"
-  # A mode (or --claude on an existing setup) runs without questions.
-  if [[ "$has_mode" == true || ( "$claude" == true && -f "$data_dir/config.json" ) ]]; then
-    step 'Setup'
-    "$bin_dir/handover" setup "${setup_args[@]}"
-    return
-  fi
-  # Under curl | bash, stdin is the pipe. Hand setup the real terminal behind stdout.
+  # Under curl | bash, stdin is the pipe. Hand prompts the real terminal behind stdout.
   local tty_dev=''
   if [[ -t 0 ]]; then
     tty_dev=/dev/stdin
   elif [[ -t 1 ]]; then
     tty_dev="$(tty <&1 2>/dev/null)" || tty_dev=''
   fi
-  if [[ ! -f "$data_dir/config.json" && "$tty_dev" == /dev/* && "$tty_dev" != /dev/tty ]]; then
-    step 'Setup'
-    "$bin_dir/handover" setup <"$tty_dev" || info 'Setup did not finish; rerun it any time with: handover setup'
-  else
-    printf '\nhandover installed. Next: handover setup (first time) or handover doctor\n'
-  fi
+  local has_tty=false
+  [[ "$tty_dev" == /dev/* && "$tty_dev" != /dev/tty ]] && has_tty=true
+
+  case "$mode" in
+    host)
+      step 'Host'
+      "$bin_dir/handover" host ${role_args[@]+"${role_args[@]}"} ${host_args[@]+"${host_args[@]}"}
+      ;;
+    join)
+      step 'Join'
+      local -a join_args=()
+      [[ -z "$join_url" ]] || join_args+=("$join_url")
+      if [[ -z "${HANDOVER_TOKEN:-}" && "$has_tty" == true ]]; then
+        "$bin_dir/handover" join ${join_args[@]+"${join_args[@]}"} ${role_args[@]+"${role_args[@]}"} <"$tty_dev" # asks for the token
+      else
+        "$bin_dir/handover" join ${join_args[@]+"${join_args[@]}"} ${role_args[@]+"${role_args[@]}"}
+      fi
+      ;;
+    *)
+      if [[ ! -f "$data_dir/config.json" && "$has_tty" == true ]]; then
+        step 'Setup'
+        "$bin_dir/handover" setup <"$tty_dev" || info 'Setup did not finish; rerun it any time with: handover setup'
+      elif [[ "$claude" == true && -f "$data_dir/config.json" ]]; then
+        "$bin_dir/handover" setup --claude --hook
+      else
+        printf '\nhandover installed. Next: handover host (this machine is the hub) or handover join\n'
+      fi
+      ;;
+  esac
 }
 
 main "$@"

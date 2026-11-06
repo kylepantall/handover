@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs';
 import { claudeRegistration, hookInstalled } from './claude.ts';
 import { probe } from './client.ts';
-import { agentName, endpoint, loadConfig } from './config.ts';
-import { PeerBrowser } from './discovery.ts';
+import { agentName, DEFAULT_PORT, endpoint, loadConfig, roleOf } from './config.ts';
+import { hostUrl } from './connect.ts';
 import type { Paths } from './paths.ts';
-import { serviceState } from './service.ts';
+import { serviceIsOurs, serviceState } from './service.ts';
 import type { Config } from './types.ts';
 import { compareVersions, latestVersion, resolveRef } from './update.ts';
 import { VERSION } from './version.ts';
@@ -33,7 +33,7 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
   }
 
   let config: Config = {};
-  if (!existsSync(p.config)) add('config', 'fail', 'not set up yet', 'handover setup');
+  if (!existsSync(p.config)) add('config', 'fail', 'not set up yet', 'handover host or handover join');
   else {
     try {
       config = await loadConfig(p);
@@ -43,31 +43,34 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     }
   }
 
-  const ep = config.peer ? { ...endpoint(config), url: `http://127.0.0.1:${config.relay?.port ?? 7777}` } : endpoint(config);
+  const role = roleOf(config);
+  const ep = endpoint(config);
   add('agent', 'info', agentName(config));
-  add('mode', 'info', config.peer ? 'peer-to-peer (mDNS on this network)' : config.relay ? 'relay on this machine' : 'joined relay');
-  if (!ep.token) add('relay', 'fail', `no token for ${ep.url}`, 'handover setup');
-  else {
-    const state = await probe(ep);
-    if (state === 'ok') add('relay', 'ok', `${ep.url} reachable, token accepted`);
-    else if (state === 'unauthorized') add('relay', 'fail', `${ep.url} rejected the token`, 'handover setup --join <url> --token <token>');
-    else if (!config.relay) add('relay', 'fail', `${ep.url} unreachable`, 'Is the relay running?');
-    else if (['running', 'stopped'].includes(await serviceState())) // not 'legacy': that task is to be removed
-      add('relay', 'fail', `${ep.url} not answering, but the login service is installed`, `handover service restart (log: ${p.log})`);
+  if (!role || !ep.token) {
+    add('role', 'fail', 'not set up', 'handover host (this machine is the hub) or handover join');
+  } else if (role === 'host') {
+    add('role', 'info', 'host: runs the relay; share access with handover link');
+    const local = { url: `http://127.0.0.1:${config.relay?.port ?? DEFAULT_PORT}`, token: ep.token };
+    const state = await probe(local);
+    if (state === 'ok') add('relay', 'ok', `${local.url} running, token accepted`);
+    else if (state === 'unauthorized') add('relay', 'fail', `${local.url} is another handover with a different token`, 'handover service restart');
+    else if (['running', 'stopped'].includes(await serviceState()) && (await serviceIsOurs()))
+      add('relay', 'fail', `${local.url} not answering, but the login service is installed`, `handover service restart (log: ${p.log})`);
     // Hosted on demand: not running is the normal idle state, not a failure.
     else add('relay', 'info', 'not running right now; starts with Claude Code’s MCP server, wait or worker', 'handover service install (to keep it running)');
+  } else {
+    const url = (await hostUrl(p, config)) ?? ep.url;
+    add('role', 'info', `client of ${url}${config.discover ? ' (found on this network)' : ''}`);
+    const state = await probe({ url, token: ep.token });
+    if (state === 'ok') add('host', 'ok', `${url} reachable, token accepted`);
+    else if (state === 'unauthorized') add('host', 'fail', `${url} rejected the token`, 'handover join (with the token from handover link on the host)');
+    else
+      add('host', 'fail', `${url} not answering`, 'Is the host on? A Windows host runs its relay while Claude Code is open there; handover doctor on the host');
+    if (['running', 'stopped'].includes(await serviceState()) && (await serviceIsOurs()))
+      add('service', 'warn', 'this client still has a relay login service', 'handover service uninstall');
   }
 
-  if (config.peer && ep.token) {
-    const browser = new PeerBrowser(ep.token, { settleMs: 2000 });
-    await browser.ready;
-    const others = [...new Set(browser.peers().map((p) => p.agent).filter((a) => a !== agentName(config)))];
-    browser.stop();
-    if (others.length) add('peers', 'ok', others.join(', '));
-    else add('peers', 'warn', 'no other peers seen', 'Run setup --peer with the same secret on another machine (handover token)');
-  }
-
-  if (config.relay) {
+  if (role === 'host') {
     const svc = await serviceState();
     if (svc === 'legacy')
       add('service', 'fail', 'old hidden logon task from v0.5.0 (the pattern antivirus flagged)', "handover service uninstall, or delete 'handover-relay' in Task Scheduler");
@@ -76,7 +79,7 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     else if (svc === 'not-installed')
       add('service', 'info', 'not installed: the relay runs inside handover (Claude Code’s MCP server, wait, worker) while one is open', 'handover service install');
     else add('service', 'info', 'no service manager here; run handover serve yourself');
-    if (config.relay.tunnel && !Bun.which(config.relay.tunnel))
+    if (config.relay?.tunnel && !Bun.which(config.relay.tunnel))
       add('tunnel', 'fail', `${config.relay.tunnel} not installed`, config.relay.tunnel === 'tailscale' ? 'brew install tailscale' : 'brew install cloudflared');
   }
 

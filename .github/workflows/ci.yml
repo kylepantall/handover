@@ -27,7 +27,7 @@ jobs:
           bash -n scripts/install.sh
           HANDOVER_SOURCE_DIR="$PWD" bash scripts/install.sh --no-setup
           ~/.local/bin/handover --version
-          HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover setup --relay --agent ci --no-service
+          HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover host --agent ci --no-service --no-claude
           HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover link
       - name: Uninstall
         if: runner.os != 'Windows'
@@ -61,7 +61,7 @@ jobs:
           $env:HANDOVER_TOKEN = 'ci-shared-secret'
           # A leftover v0.5.0-style task (run through conhost --headless) must be removed, not recreated.
           schtasks /Create /TN handover-relay /SC ONLOGON /TR "conhost.exe --headless cmd /c exit" /F | Out-Null
-          & ./scripts/install.ps1 -Peer -Agent ci-win
+          & ./scripts/install.ps1 -Host -Agent ci-win
           if ($LASTEXITCODE -ne 0) { throw 'install.ps1 failed' }
           cmd /c "schtasks /Query /TN handover-relay >nul 2>&1"
           if ($LASTEXITCODE -eq 0) { throw 'install.ps1 left the legacy hidden task in place' }
@@ -72,6 +72,16 @@ jobs:
           & $exe link
           if ($LASTEXITCODE -ne 0) { throw 'handover link failed' }
           & $exe doctor --json | Out-Host
+          if ((Get-Content (Join-Path $env:HANDOVER_HOME 'config.json') -Raw | ConvertFrom-Json).role -ne 'host') { throw '-Host did not make a host' }
+          # A client on the same machine joins by URL: role client, never a relay.
+          $env:HANDOVER_TOKEN = 'ci-shared-secret'
+          $clientHome = Join-Path $env:RUNNER_TEMP 'hc'
+          $saved = $env:HANDOVER_HOME; $env:HANDOVER_HOME = $clientHome
+          & $exe join http://127.0.0.1:7777 --agent ci-client
+          if ($LASTEXITCODE -ne 0) { throw 'handover join failed' }
+          $client = Get-Content (Join-Path $clientHome 'config.json') -Raw | ConvertFrom-Json
+          if ($client.role -ne 'client' -or $client.relay) { throw 'join did not make a client' }
+          $env:HANDOVER_HOME = $saved; Remove-Item Env:HANDOVER_TOKEN
       - name: Hand a task over with the compiled exe
         if: runner.os == 'Windows'
         shell: pwsh

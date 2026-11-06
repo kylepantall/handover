@@ -1,23 +1,28 @@
 # Installs handover on Windows from a GitHub Release: handover.exe, checked
 # against the release's SHA256SUMS, into %LOCALAPPDATA%\handover\app (added to
-# your user PATH). Then runs "handover setup".
+# your user PATH). Then sets it up as the host or as a client (docs/flow.md).
 #
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1)))
-#   $env:HANDOVER_TOKEN='<secret>'; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Peer
+#   Host:   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Host
+#   Client: $env:HANDOVER_TOKEN='<token>'; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Join
 #
 # HANDOVER_RELEASE_DIR installs from a folder holding the zip and SHA256SUMS
 # (used by CI) instead of downloading.
 [CmdletBinding()]
 param(
   [string]$Version = 'latest',
+  # Not $Host: that's PowerShell's read-only automatic variable. -Host still works.
+  [Alias('Host')][switch]$HostMode,
+  [switch]$Join,
+  [string]$Url,
+  [string]$Agent,
+  [switch]$NoClaude,
+  [switch]$NoSetup,
+  [switch]$Help,
+  # Old flags (docs/flow.md, Compatibility).
   [switch]$Peer,
   [switch]$Relay,
-  [string]$Join,
   [string]$Token,
-  [string]$Agent,
-  [switch]$Claude,
-  [switch]$NoSetup,
-  [switch]$Help
+  [switch]$Claude
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -30,18 +35,22 @@ function Write-Info([string]$Text) { Write-Host "    $Text" }
 function Install-Handover {
   $repo = if ($env:HANDOVER_REPO) { $env:HANDOVER_REPO } else { 'kylepantall/handover' }
   if ($Help) {
-    Write-Host 'Usage: [$env:HANDOVER_TOKEN=T;] install.ps1 [-Peer | -Relay | -Join URL] [-Agent NAME] [-Claude] [-NoSetup] [-Version x.y.z]'
+    Write-Host 'Usage: install.ps1 [-Host | -Join [-Url URL]] [-Agent NAME] [-NoClaude] [-NoSetup] [-Version x.y.z]'
     Write-Host "Installs a $repo release (default latest) under %LOCALAPPDATA%\handover\app and adds it to your user PATH."
-    Write-Host '  -Peer               Peer-to-peer on this network (other machines: set $env:HANDOVER_TOKEN first)'
-    Write-Host '  -Relay              Make this machine the relay'
-    Write-Host '  -Join URL           Connect to a relay (token in $env:HANDOVER_TOKEN)'
-    Write-Host '  -Claude             Add the MCP server and SessionStart hook to Claude Code'
+    Write-Host '  -Host               Make this machine the host: prints the token and join commands'
+    Write-Host '  -Join               Join a host: token from $env:HANDOVER_TOKEN (handover link on the host prints the'
+    Write-Host '                      whole command) or asked for; finds the host on this network'
+    Write-Host '  -Url URL            The host''s address, only if it is on another network'
+    Write-Host '  -NoClaude           Don''t add handover to Claude Code (added by default when installed)'
+    Write-Host 'No option: a menu asks host or join.'
     return
   }
+  # Old: -Join 'URL' (now -Join -Url URL) binds the URL to -Version.
+  if ($Version -match '^https?://') { $script:Url = $Version; $script:Version = 'latest'; $script:Join = $true }
+  if ($Token) { $env:HANDOVER_TOKEN = $Token } # old links: the environment, never handover.exe's argv
+  $mode = if ($HostMode -or $Relay) { 'host' } elseif ($Join -or $Url) { 'join' } elseif ($Peer) { if ($env:HANDOVER_TOKEN) { 'join' } else { 'host' } } else { '' }
+  if ($HostMode -and ($Join -or $Url)) { throw 'Use -Host or -Join, not both.' }
   if ($Version -ne 'latest' -and $Version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $Version" }
-  $modes = @(@([bool]$Peer, [bool]$Relay, [bool]$Join) | Where-Object { $_ })
-  if ($modes.Count -gt 1) { throw 'Use one of -Peer, -Relay or -Join.' }
-  if ($Join -and -not $Token -and -not $env:HANDOVER_TOKEN) { throw '-Join needs the relay token: set $env:HANDOVER_TOKEN (handover link prints the command).' }
   $label = if ($env:HANDOVER_RELEASE_DIR) { $env:HANDOVER_RELEASE_DIR } elseif ($Version -eq 'latest') { "$repo (latest release)" } else { "$repo v$Version" }
   Write-Host "handover installer - $label"
 
@@ -138,31 +147,34 @@ function Install-Handover {
     }
     $ErrorActionPreference = $previous
 
-    $setupArgs = @()
-    if ($Peer) { $setupArgs += '--peer' }
-    if ($Relay) { $setupArgs += '--relay' }
-    if ($Join) { $setupArgs += @('--join', $Join) }
-    # The token reaches setup through the environment, never handover.exe's command line.
-    if ($Token) { $env:HANDOVER_TOKEN = $Token }
-    if ($Agent) { $setupArgs += @('--agent', $Agent) }
-    $hasMode = $Peer -or $Relay -or [bool]$Join
-    if ($Claude) { $setupArgs += @('--claude', '--hook') }
+    $roleArgs = @()
+    if ($Agent) { $roleArgs += @('--agent', $Agent) }
+    if ($NoClaude) { $roleArgs += '--no-claude' }
 
     # Not $home: that's PowerShell's read-only automatic variable.
     $dataDir = if ($env:HANDOVER_HOME) { $env:HANDOVER_HOME } else { Join-Path $env:APPDATA 'handover' }
     $configured = Test-Path (Join-Path $dataDir 'config.json')
     if ($NoSetup) {
-      Write-Host "`nhandover installed. Next: handover setup"
-    } elseif ($hasMode -or ($Claude -and $configured)) {
-      Write-Step 'Setup'
-      & $exe setup @setupArgs
-      if ($LASTEXITCODE -ne 0) { throw 'Setup failed; fix the error above and rerun: handover setup' }
+      Write-Host "`nhandover installed. Next: handover host (this machine is the hub) or handover join"
+    } elseif ($mode -eq 'host') {
+      Write-Step 'Host'
+      & $exe host @roleArgs
+      if ($LASTEXITCODE -ne 0) { throw 'Setting up the host failed; fix the error above and rerun: handover host' }
+    } elseif ($mode -eq 'join') {
+      Write-Step 'Join'
+      $joinArgs = @()
+      if ($Url) { $joinArgs += $Url }
+      # No HANDOVER_TOKEN: join asks for it (a hidden prompt), never as an argument.
+      & $exe join @joinArgs @roleArgs
+      if ($LASTEXITCODE -ne 0) { throw 'Joining failed; fix the error above and rerun: handover join' }
     } elseif (-not $configured -and [Environment]::UserInteractive) {
       Write-Step 'Setup'
       & $exe setup
       if ($LASTEXITCODE -ne 0) { Write-Info 'Setup did not finish; rerun it any time with: handover setup' }
+    } elseif ($Claude -and $configured) {
+      & $exe setup --claude --hook
     } else {
-      Write-Host "`nhandover installed. Next: handover setup (first time) or handover doctor"
+      Write-Host "`nhandover installed. Next: handover host (this machine is the hub) or handover join"
     }
   } finally {
     Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue

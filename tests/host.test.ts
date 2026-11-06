@@ -111,6 +111,6 @@ test('serve stands by instead of failing when another process hosts the relay', 
   expect(serve.child.exitCode).toBeNull(); // still running, not crash-looping
 
   host.child.kill('SIGTERM');
-  await until(() => out.includes('Handover relay running'));
+  await until(() => out.includes('running (announced'));
   expect(await healthy()).toBe(true);
 }, 45_000);

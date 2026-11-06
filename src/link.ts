@@ -1,6 +1,6 @@
-/** `handover link`: the commands that connect another machine to this one, per OS. */
+/** `handover link`: what a host shares so other machines can join it (docs/flow.md). */
 
-import { DEFAULT_PORT, endpoint } from './config.ts';
+import { DEFAULT_PORT, endpoint, roleOf } from './config.ts';
 import { REPO } from './paths.ts';
 import { lanAddresses } from './server.ts';
 import type { Config } from './types.ts';
@@ -8,63 +8,45 @@ import type { Config } from './types.ts';
 const raw = (file: string) => `https://raw.githubusercontent.com/${REPO}/main/scripts/${file}`;
 
 export interface LinkInfo {
-  mode: 'peer' | 'relay';
-  /** Relay URL other machines should use (relay mode). */
-  url?: string;
   token: string;
+  /** Explicit host URL in the join commands: only when clients can't find the host themselves (tunnel). */
+  url?: string;
+  /** This host's LAN address, for clients where discovery is blocked. */
+  lanUrl: string;
   unix: string;
   windows: string;
-  /** Extra guidance, e.g. about reaching the relay from outside the network. */
-  note?: string;
-}
-
-/** Relay URL as another machine would reach it. */
-function relayUrlFor(config: Config): string {
-  const configured = endpoint(config).url;
-  const local = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/.test(configured);
-  if (!config.relay || !local) return configured; // a joined machine shares the relay it uses
-  const ip = lanAddresses()[0];
-  return `http://${ip ?? '<this-machine-ip>'}:${config.relay.port ?? DEFAULT_PORT}`;
+  installed: string;
 }
 
 export function linkInfo(config: Config): LinkInfo {
+  const role = roleOf(config);
+  if (role === 'client') throw new Error(`this machine is a client of ${config.url}: run handover link on the host`);
   const { token } = endpoint(config);
-  if (!token) throw new Error('nothing to link yet: run handover setup');
+  if (!token || !role) throw new Error('not set up: run handover host');
   // PowerShell single quotes are literal; double any quote inside.
   const ps = (s: string) => `'${s.replace(/'/g, "''")}'`;
   const sh = (s: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+  const port = config.relay?.port ?? DEFAULT_PORT;
+  const lanUrl = `http://${lanAddresses()[0] ?? '<this-machine-ip>'}:${port}`;
+  // Same network: clients find the host by mDNS, so no URL. A tunnel URL is for other networks.
+  const url = config.relay?.tunnel && config.url && !/127\.0\.0\.1|localhost/.test(config.url) ? config.url : undefined;
   // The token travels in an environment variable, never as an argument: arguments
   // are visible in process lists and recorded by antivirus behaviour monitors.
-  const winInstall = `$env:HANDOVER_TOKEN=${ps(token)}; & ([scriptblock]::Create((irm ${raw('install.ps1')})))`;
-  const unixInstall = `curl -fsSL ${raw('install.sh')} | HANDOVER_TOKEN=${sh(token)} bash -s --`;
-
-  if (config.peer) {
-    return {
-      mode: 'peer',
-      token,
-      unix: `${unixInstall} --peer`,
-      windows: `${winInstall} -Peer`,
-      note: 'Machines on the same network find each other automatically.',
-    };
-  }
-  const url = relayUrlFor(config);
   return {
-    mode: 'relay',
-    url,
     token,
-    unix: `${unixInstall} --join ${sh(url)}`,
-    windows: `${winInstall} -Join ${ps(url)}`,
-    note: config.relay?.tunnel
-      ? `From outside this network, swap the URL for the ${config.relay.tunnel} URL in: handover service log`
-      : config.relay
-        ? 'Off this network: rerun setup with a tunnel (tailscale or cloudflared).'
-        : undefined,
+    url,
+    lanUrl,
+    unix: `curl -fsSL ${raw('install.sh')} | HANDOVER_TOKEN=${sh(token)} bash -s -- --join${url ? ` ${sh(url)}` : ''}`,
+    windows: `$env:HANDOVER_TOKEN=${ps(token)}; & ([scriptblock]::Create((irm ${raw('install.ps1')}))) -Join${url ? ` -Url ${ps(url)}` : ''}`,
+    installed: `handover join${url ? ` ${url}` : ''}`,
   };
 }
 
 export function formatLink(info: LinkInfo): string {
   return [
-    info.mode === 'peer' ? 'Connect another machine on this network:' : `Connect another machine to ${info.url}:`,
+    `Token: ${info.token}`,
+    '',
+    'Join from another machine:',
     '',
     '  macOS / Linux:',
     `    ${info.unix}`,
@@ -72,11 +54,11 @@ export function formatLink(info: LinkInfo): string {
     '  Windows (PowerShell):',
     `    ${info.windows}`,
     '',
-    info.mode === 'peer'
-      ? '  handover already installed there? Run: handover join   (it asks for the secret)'
-      : `  handover already installed there? Run: handover join ${info.url}   (it asks for the token)`,
-    ...(info.note ? ['', info.note] : []),
+    `  Already installed:  ${info.installed}   (asks for the token)`,
     '',
-    'These contain the token: share them like a password.',
+    info.url
+      ? `Clients join through ${info.url}.`
+      : `Clients on this network find this host automatically. If one can't, add the address: --join ${info.lanUrl} (Windows: -Url ${info.lanUrl}).`,
+    'The token gives full access to the queue: share it like a password.',
   ].join('\n');
 }

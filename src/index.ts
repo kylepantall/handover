@@ -8,8 +8,7 @@ import { formatLink, linkInfo } from './link.ts';
 import { removeHook, unregisterFromClaude } from './claude.ts';
 import { paths } from './paths.ts';
 import { installService, serviceState, uninstallService } from './service.ts';
-import { runJoin } from './join.ts';
-import { runSetup } from './setup.ts';
+import { isRelayUrl, runHost, runJoin, runSetup } from './setup.ts';
 import { TUNNELS, type Tunnel } from './types.ts';
 import { runUpdate } from './update.ts';
 import { VERSION } from './version.ts';
@@ -18,14 +17,12 @@ const HELP = `handover ${VERSION} — hand tasks between AI agents on different 
 
 Usage: handover <command>
 
-  setup                         Guided setup: peer-to-peer, run a relay here, or join one; name this
-                                agent; add the MCP server and SessionStart hook to Claude Code
-        --peer [--token SECRET]                                (scripted: peer-to-peer on this network)
-        --relay [--port N] [--tunnel tailscale|cloudflared]   (scripted: this machine is the relay)
-        --join URL --token T                                   (scripted: connect to a relay)
-        [--agent NAME] [--claude] [--hook] [--no-service]
-  join [RELAY_URL]              Join peers on this network, or the relay at RELAY_URL; asks for the
-                                secret (or reads HANDOVER_TOKEN) [--agent NAME] [--no-service]
+  host                          Make this machine the host: it runs the relay, and prints the token and
+                                the join commands for other machines (docs/flow.md)
+        [--agent NAME] [--port N] [--tunnel tailscale|cloudflared] [--no-service] [--no-claude]
+  join [HOST_URL]               Join a host: asks for its token (or reads HANDOVER_TOKEN) and finds it on
+                                this network; HOST_URL only if it's elsewhere [--agent NAME] [--no-claude]
+  setup                         Menu: host or join
   wait --objective TEXT         Create a handover and block until an agent completes it
         [--context TEXT | --context-file PATH] [--to AGENT] [--priority N]
         [--id ID] [--out DIR] [--timeout SEC] [--json]
@@ -37,9 +34,9 @@ Usage: handover <command>
         [--max-attempts N] [--retention HOURS] [--log FILE] [--home DIR]
   service install|uninstall|restart|status|log
                                 Run the relay at login (launchd, systemd --user, or Task Scheduler)
-  link [--json]                 Print the commands that connect another machine (macOS/Linux and Windows)
-  token                         Print the relay token / peer secret
-  doctor [--json]               Check config, relay, service and Claude Code
+  link [--json]                 Host: print the token and join commands (macOS/Linux and Windows)
+  token                         Print this machine's token
+  doctor [--json]               Check role, relay or host, service and Claude Code
   update [--check] [--ref R]    Install the latest version from GitHub
   claude-unlink                 Remove this install's MCP server and SessionStart hook from Claude Code
   mcp                           MCP server over stdio; Claude Code starts this
@@ -51,13 +48,14 @@ Env overrides: HANDOVER_URL, HANDOVER_TOKEN, HANDOVER_AGENT.`;
 const s = { type: 'string' } as const;
 const b = { type: 'boolean' } as const;
 const OPTIONS: Record<string, ParseArgsConfig['options']> = {
+  host: { agent: s, port: s, tunnel: s, 'no-service': b, 'no-claude': b },
   setup: { peer: b, relay: b, join: s, token: s, port: s, tunnel: s, agent: s, claude: b, hook: b, 'no-service': b },
   wait: { objective: s, context: s, 'context-file': s, id: s, to: s, priority: s, out: s, timeout: s, json: b },
   worker: { exec: s, agent: s, lease: s, interval: s, once: b },
   list: { status: s, for: s },
   serve: { port: s, host: s, token: s, tunnel: s, data: s, lease: s, 'max-attempts': s, retention: s, log: s, home: s },
   link: { json: b },
-  join: { agent: s, 'no-service': b },
+  join: { agent: s, 'no-claude': b },
   doctor: { json: b },
   update: { check: b, force: b, ref: s },
 };
@@ -112,9 +110,23 @@ async function main(argv: string[]): Promise<number | null> {
         hook: o.hook === true,
         service: o['no-service'] ? false : undefined,
       });
-    case 'join':
-      if (positionals.length > 1) throw new Error('Usage: handover join [RELAY_URL]');
-      return runJoin(p, { target: positionals[0], agent: str('agent'), service: o['no-service'] ? false : undefined });
+    case 'host':
+      return runHost(p, {
+        agent: str('agent'),
+        port: num(o.port, 'port'),
+        tunnel: tunnel(o.tunnel),
+        service: o['no-service'] ? false : undefined,
+        claude: o['no-claude'] ? false : undefined,
+      });
+    case 'join': {
+      const [url, extra] = positionals;
+      if (extra) throw new Error('Usage: handover join [HOST_URL]');
+      if (url && !isRelayUrl(url))
+        throw new Error(
+          'don’t put the token on the command line (process lists and antivirus logs record it). Run `handover join` and paste it when asked, or set HANDOVER_TOKEN.'
+        );
+      return runJoin(p, { url, agent: str('agent'), claude: o['no-claude'] ? false : undefined });
+    }
     case 'serve':
       await serve(p, {
         port: num(o.port, 'port'),

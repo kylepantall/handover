@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0
+
+Setup is now host / client ([docs/flow.md](docs/flow.md)):
+
+- ⚠️ `handover host` (installer `--host` / `-Host`): this machine runs the relay and prints the token and join commands. `handover join` (installer `--join` / `-Join`): asks for the token, finds the host on this network by mDNS (URL only when it's elsewhere), and never runs a relay.
+- ⚠️ Peer-to-peer mode is gone. `--peer` without a token now means host, with `HANDOVER_TOKEN` it means join; `--relay` means host. Old configs are read as host (relay/peer) or client (joined URL).
+- A client that found its host by discovery finds it again when the host's address changes.
+- `handover link` only runs on the host. `serve` refuses on a client. Joining removes a relay service this install had set up as a host.
+- Claude Code is wired up by default when its CLI is installed; `--no-claude` / `-NoClaude` skips it.
+- `install.sh --no-service` for hosts. The installer only restarts a login service that runs its own launcher, so a second install never repoints yours; becoming host leaves another install's service alone.
+- `launchctl` is called by absolute path.
+
 ## 0.6.6
 
 - `handover join [RELAY_URL]`: join peers on this network (or a relay) on a machine that already has handover. Asks for the secret, or reads `HANDOVER_TOKEN`; refuses a secret on the command line. `handover link` mentions it.

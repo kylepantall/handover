@@ -1,4 +1,7 @@
-/** Peer discovery on the local network over mDNS / DNS-SD (`_handover._tcp`). */
+/**
+ * Host discovery on the local network over mDNS / DNS-SD (`_handover._tcp`).
+ * A host announces itself; a client finds the host with its token's network id.
+ */
 
 import { createHash, randomBytes } from 'node:crypto';
 import { isIPv4 } from 'node:net';
@@ -6,24 +9,34 @@ import { Bonjour, type Service } from 'bonjour-service';
 import type { Peer } from './types.ts';
 
 const TYPE = 'handover';
+const HOST_ROLE = 'host';
 
-/** mDNS can be unavailable (no multicast, firewall): degrade to "no peers" rather than crash. */
+/** mDNS can be unavailable (no multicast, firewall): degrade to "not found" rather than crash. */
 const onMdnsError = (err: Error) => console.error('mdns unavailable', { error: err.message });
 
 /**
- * Public identifier for a shared token, advertised so peers on other handover
- * networks ignore each other. One-way: the token can't be recovered from it.
+ * Public identifier for a token, announced so clients of other handover hosts
+ * ignore this one. One-way: the token can't be recovered from it.
  */
 export function networkId(token: string): string {
   return createHash('sha256').update(`handover-network:${token}`).digest('hex').slice(0, 16);
 }
 
-/** Announces this machine's relay. Returns a function that withdraws it. */
+/** Announces this machine's relay as a host. Returns a function that withdraws it. */
 export function advertise({ port, agent, token }: { port: number; agent: string; token: string }): () => Promise<void> {
   const bonjour = new Bonjour({}, onMdnsError);
   // The suffix keeps names unique if two machines pick the same agent name.
-  bonjour.publish({ name: `handover-${agent}-${randomBytes(2).toString('hex')}`, type: TYPE, port, txt: { agent, net: networkId(token), v: '1' } });
-  return () => new Promise((resolve) => bonjour.unpublishAll(() => (bonjour.destroy(), resolve())));
+  bonjour.publish({
+    name: `handover-${agent}-${randomBytes(2).toString('hex')}`,
+    type: TYPE,
+    port,
+    txt: { agent, net: networkId(token), role: HOST_ROLE, v: '2' },
+  });
+  return () =>
+    Promise.race([
+      new Promise<void>((resolve) => bonjour.unpublishAll(() => (bonjour.destroy(), resolve()))),
+      Bun.sleep(2000), // never hang shutdown on mDNS
+    ]);
 }
 
 function urlFor(s: Service): string | null {
@@ -31,31 +44,33 @@ function urlFor(s: Service): string | null {
   return host ? `http://${host}:${s.port}` : null;
 }
 
-/** Keeps a live list of peers on the same handover network. */
-export class PeerBrowser {
-  #bonjour = new Bonjour({}, onMdnsError);
-  #peers = new Map<string, Peer>();
-  #browser;
-  readonly ready: Promise<void>;
-
-  constructor(token: string, { settleMs = 1500 } = {}) {
-    const net = networkId(token);
-    this.#browser = this.#bonjour.find({ type: TYPE }, (s) => {
-      const url = urlFor(s);
-      const agent = typeof s.txt?.agent === 'string' ? s.txt.agent : null;
-      if (s.txt?.net === net && url && agent) this.#peers.set(s.name, { agent, url });
+/** Hosts on this network announced with the same token, found within `timeoutMs`. */
+export async function findHosts(token: string, { timeoutMs = 3000, first = false } = {}): Promise<Peer[]> {
+  const net = networkId(token);
+  const bonjour = new Bonjour({}, onMdnsError);
+  const found = new Map<string, Peer>();
+  try {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      bonjour.find({ type: TYPE }, (s) => {
+        const url = urlFor(s);
+        const agent = typeof s.txt?.agent === 'string' ? s.txt.agent : null;
+        // v0.4–0.6 peers announced no role: not hosts.
+        if (s.txt?.net !== net || s.txt?.role !== HOST_ROLE || !url || !agent) return;
+        found.set(url, { agent, url });
+        if (first) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
     });
-    this.#browser.on('down', (s: Service) => this.#peers.delete(s.name));
-    // Answers to the first query arrive within about a second.
-    this.ready = Bun.sleep(settleMs);
+  } finally {
+    bonjour.destroy();
   }
+  return [...found.values()];
+}
 
-  peers(): Peer[] {
-    return [...this.#peers.values()];
-  }
-
-  stop(): void {
-    this.#browser.stop();
-    this.#bonjour.destroy();
-  }
+/** The first host found with this token, or null. */
+export async function findHost(token: string, timeoutMs = 3000): Promise<Peer | null> {
+  return (await findHosts(token, { timeoutMs, first: true }))[0] ?? null;
 }

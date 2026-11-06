@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { writePrivate, type Paths } from './paths.ts';
 import type { Endpoint } from './client.ts';
-import type { Config } from './types.ts';
+import type { Config, Role } from './types.ts';
 
 export const DEFAULT_PORT = 7777;
 
@@ -35,6 +35,13 @@ export function endpoint(config: Config): Endpoint {
 export function defaultAgentName(): string {
   const short = hostname().split('.')[0] ?? 'agent';
   return short.replace(/[^A-Za-z0-9._@:-]/g, '-').slice(0, 64) || 'agent';
+}
+
+/** The machine's role, reading pre-0.7 configs (relay / peer → host, a joined url → client). */
+export function roleOf(config: Config): Role | undefined {
+  if (config.role) return config.role;
+  if (config.relay || config.peer) return 'host';
+  return config.url ? 'client' : undefined;
 }
 
 export function agentName(config: Config): string {

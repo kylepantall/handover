@@ -19,6 +19,8 @@ export type ServiceState = 'running' | 'stopped' | 'not-installed' | 'unsupporte
 export const isLegacyTaskXml = (xml: string): boolean => /conhost|<Hidden>\s*true\s*<\/Hidden>/i.test(xml);
 
 const LABEL = 'com.kylepantall.handover';
+/** Absolute, like the Windows system tools: never whatever `launchctl` PATH finds first. */
+const LAUNCHCTL = '/bin/launchctl';
 const UNIT = 'handover.service';
 const TASK = 'handover-relay';
 
@@ -144,9 +146,9 @@ async function must(cmd: string, args: string[]): Promise<void> {
  */
 async function unloadLaunchd(): Promise<void> {
   const target = `${domain()}/${LABEL}`;
-  await runProcess('launchctl', ['bootout', target]); // fine if it was not loaded
+  await runProcess(LAUNCHCTL, ['bootout', target]); // fine if it was not loaded
   const end = Date.now() + 10_000;
-  while (Date.now() < end && (await runProcess('launchctl', ['print', target])).code === 0) await Bun.sleep(200);
+  while (Date.now() < end && (await runProcess(LAUNCHCTL, ['print', target])).code === 0) await Bun.sleep(200);
 }
 
 export async function installService(): Promise<void> {
@@ -174,7 +176,7 @@ export async function installService(): Promise<void> {
     await unloadLaunchd();
     // Even after unloading, launchd can briefly refuse the same label (error 5).
     for (let attempt = 1; ; attempt++) {
-      const r = await runProcess('launchctl', ['bootstrap', domain(), file]);
+      const r = await runProcess(LAUNCHCTL, ['bootstrap', domain(), file]);
       if (r.code === 0) break;
       if (attempt >= 5) throw new Error(`launchctl bootstrap ${domain()} ${file} failed: ${r.stderr.trim() || r.stdout.trim()}`);
       await Bun.sleep(1000);
@@ -217,11 +219,31 @@ export async function serviceState(): Promise<ServiceState> {
   }
   if (process.platform === 'darwin') {
     if (!existsSync(plistPath())) return 'not-installed';
-    const r = await runProcess('launchctl', ['print', `${domain()}/${LABEL}`]);
+    const r = await runProcess(LAUNCHCTL, ['print', `${domain()}/${LABEL}`]);
     return r.code === 0 && /state = running/.test(r.stdout) ? 'running' : 'stopped';
   }
   if (!serviceSupported()) return 'unsupported';
   if (!existsSync(unitPath())) return 'not-installed';
   const r = await runProcess('systemctl', ['--user', 'is-active', UNIT]);
   return r.stdout.trim() === 'active' ? 'running' : 'stopped';
+}
+
+/**
+ * Whether the installed login service runs this install (its executable or
+ * launcher). The service label is machine-wide, so a test checkout or a second
+ * install must never remove or replace the user's real one.
+ */
+export async function serviceIsOurs(): Promise<boolean> {
+  const [exe] = selfCommand();
+  let definition = '';
+  if (isWindows) {
+    const r = await runProcess(windowsSystem('schtasks.exe'), ['/Query', '/TN', TASK, '/XML']);
+    if (r.code !== 0) return false;
+    definition = r.stdout;
+  } else {
+    const file = process.platform === 'darwin' ? plistPath() : unitPath();
+    if (!existsSync(file)) return false;
+    definition = await Bun.file(file).text();
+  }
+  return definition.includes(exe!) || (isWindows && definition.includes(exe!.replace(/\//g, '\\')));
 }

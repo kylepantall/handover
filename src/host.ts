@@ -8,7 +8,7 @@
 
 import type { Server } from 'node:http';
 import path from 'node:path';
-import { agentName, DEFAULT_PORT } from './config.ts';
+import { agentName, DEFAULT_PORT, roleOf } from './config.ts';
 import { advertise } from './discovery.ts';
 import type { Paths } from './paths.ts';
 import { startServer } from './server.ts';
@@ -45,7 +45,8 @@ export async function hostRelay(p: Paths, config: Config, opts: { host?: string;
   const port = opts.port ?? config.relay?.port ?? DEFAULT_PORT;
   const { store } = storeFor(p, config, opts);
   const { server } = await startServer({ port, host: opts.host ?? config.relay?.host ?? '0.0.0.0', token: opts.token, store });
-  const unadvertise = config.peer ? advertise({ port, agent: agentName(config), token: opts.token }) : null;
+  // Clients find the host by this announcement (docs/flow.md).
+  const unadvertise = advertise({ port, agent: agentName(config), token: opts.token });
   let stopped = false;
   return {
     server,
@@ -55,7 +56,7 @@ export async function hostRelay(p: Paths, config: Config, opts: { host?: string;
       stopped = true;
       store.flush();
       server.close();
-      await unadvertise?.().catch(() => {});
+      await unadvertise().catch(() => {});
     },
   };
 }
@@ -90,9 +91,10 @@ function hookExit(): void {
  * HANDOVER_URL doesn't point elsewhere.
  */
 export async function ensureLocalRelay(p: Paths, config: Config): Promise<'running' | 'hosting' | 'not-local'> {
-  if (!config.relay || !config.token || process.env.HANDOVER_URL) return 'not-local';
+  // Only a host runs a relay; a client never does (docs/flow.md).
+  if (roleOf(config) !== 'host' || !config.token || process.env.HANDOVER_URL) return 'not-local';
   if (hosted) return 'hosting';
-  const port = config.relay.port ?? DEFAULT_PORT;
+  const port = config.relay?.port ?? DEFAULT_PORT;
   if (await relayUp(port)) return 'running';
   try {
     hosted = await hostRelay(p, config, { token: config.token });
