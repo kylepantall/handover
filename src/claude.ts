@@ -1,0 +1,81 @@
+import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { appRoot, writePrivate } from './paths.ts';
+import { runProcess } from './process.ts';
+
+/** argv that runs this install's CLI with `sub` (the launcher when installed). */
+export function selfCommand(...sub: string[]): string[] {
+  const launcher = process.env.HANDOVER_LAUNCHER;
+  if (launcher) return [launcher, ...sub];
+  return [process.execPath, join(appRoot, 'src', 'index.ts'), ...sub];
+}
+
+const shellQuote = (s: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+
+export async function claudeRegistration(): Promise<'registered' | 'missing' | 'no-claude'> {
+  const claude = Bun.which('claude');
+  if (!claude) return 'no-claude';
+  const result = await runProcess(claude, ['mcp', 'get', 'handover'], { timeoutMs: 20_000 }).catch(() => null);
+  return result?.code === 0 ? 'registered' : 'missing';
+}
+
+export async function registerWithClaude(): Promise<void> {
+  const claude = Bun.which('claude');
+  if (!claude) throw new Error('claude CLI not found.');
+  const result = await runProcess(
+    claude,
+    ['mcp', 'add', '--transport', 'stdio', '--scope', 'user', 'handover', '--', ...selfCommand('mcp')],
+    { timeoutMs: 30_000 }
+  );
+  if (result.code !== 0) throw new Error(`claude mcp add failed: ${result.stderr.trim() || result.stdout.trim()}`);
+}
+
+// --- SessionStart hook in ~/.claude/settings.json ---
+
+interface HookEntry {
+  type?: string;
+  command?: string;
+}
+interface Settings {
+  hooks?: Record<string, Array<{ matcher?: string; hooks?: HookEntry[] }>>;
+  [key: string]: unknown;
+}
+
+export function claudeSettingsPath(): string {
+  return join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'settings.json');
+}
+
+async function readSettings(file: string): Promise<Settings> {
+  try {
+    return JSON.parse(await readFile(file, 'utf8')) as Settings;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new Error(`could not read ${file}: ${(err as Error).message}`);
+  }
+}
+
+const hookCommand = () => selfCommand('hook').map(shellQuote).join(' ');
+
+/** This install's hook, or any `…/handover hook` (e.g. from an earlier install path). */
+const isOurHook = (h: HookEntry) => {
+  const command = typeof h.command === 'string' ? h.command.trim() : '';
+  return command === hookCommand() || /(^|[/\s'])handover'? hook$/.test(command);
+};
+
+export async function hookInstalled(file = claudeSettingsPath()): Promise<boolean> {
+  const settings = await readSettings(file);
+  return (settings.hooks?.SessionStart ?? []).some((group) => (group.hooks ?? []).some(isOurHook));
+}
+
+/** Adds `handover hook` as a SessionStart hook, leaving every other setting as it was. */
+export async function installHook(file = claudeSettingsPath()): Promise<'added' | 'present'> {
+  if (await hookInstalled(file)) return 'present';
+  const settings = await readSettings(file);
+  const command = hookCommand();
+  settings.hooks ??= {};
+  settings.hooks.SessionStart ??= [];
+  settings.hooks.SessionStart.push({ hooks: [{ type: 'command', command }] });
+  await writePrivate(file, JSON.stringify(settings, null, 2) + '\n');
+  return 'added';
+}

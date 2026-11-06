@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test tests
+      - run: bash -n scripts/install.sh
+      - name: Install from this checkout
+        run: |
+          HANDOVER_SOURCE_DIR="$PWD" bash scripts/install.sh --no-setup
+          ~/.local/bin/handover --version
+          HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover setup --relay --agent ci --no-service
+          HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover token

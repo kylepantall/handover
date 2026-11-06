@@ -1,20 +1,34 @@
 {
-  "name": "handover-mcp",
-  "version": "0.2.0",
-  "description": "Hand tasks between LLM agents across machines via MCP",
-  "scripts": {
-    "test": "node --test test/*.test.js"
-  },
-  "license": "ISC",
+  "name": "handover",
+  "version": "0.3.0",
+  "private": true,
+  "description": "MCP relay that hands tasks between LLM agents on different machines and returns the results to whoever is waiting.",
   "type": "module",
+  "bin": {
+    "handover": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts serve",
+    "test": "bun test tests",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Kyle Pantall",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kylepantall/handover.git"
+  },
+  "engines": {
+    "bun": ">=1.4.3"
+  },
+  "packageManager": "bun@1.4.3",
   "dependencies": {
+    "@clack/prompts": "^1.8.1",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "zod": "^4.6.7"
   },
-  "bin": {
-    "handover": "bin/handover.js"
-  },
-  "engines": {
-    "node": ">=20"
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
   }
 }
