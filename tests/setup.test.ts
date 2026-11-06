@@ -125,7 +125,11 @@ test('join: the token never comes from the command line', async () => {
   expect(existsSync(paths(dir).config)).toBe(false);
 }, 15_000);
 
-test('join with no URL finds the host on this network (real mDNS)', async () => {
+// GitHub's macOS runners are VMs that block multicast, so mDNS can't work there.
+// Ubuntu CI and real Macs run it.
+const noMulticast = process.env.GITHUB_ACTIONS === 'true' && process.platform === 'darwin';
+
+test.skipIf(noMulticast)('join with no URL finds the host on this network (real mDNS)', async () => {
   const hostHome = path.join(dir, 'host');
   const clientHome = path.join(dir, 'client');
   const port = await freePort();
