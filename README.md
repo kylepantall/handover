@@ -61,6 +61,17 @@ Running the installer with no options starts the guided `handover setup`, which 
 
 ⚠️ Windows: the first time the relay starts, Windows Firewall asks whether to allow `handover.exe`. Allow **private networks** so other machines can reach it. If antivirus flags it, see [docs/antivirus.md](docs/antivirus.md); releases are signed once [docs/signing.md](docs/signing.md) is set up.
 
+## Uninstall
+
+One command per OS. It removes the login service / logon task (including the hidden one v0.5.0 created), running relays, the Claude Code MCP server and SessionStart hook, the PATH entry, the app, and your config and queue. Each step prints its result.
+
+| OS | Command |
+|---|---|
+| macOS / Linux | `curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/uninstall.sh \| bash` |
+| Windows (PowerShell) | `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/uninstall.ps1)))` |
+
+Keep the config and queue (to reinstall with the same secret): add `-s -- --keep-config` (macOS/Linux) or `-KeepConfig` (Windows). Only things belonging to that install are removed. If Windows reports "access denied" even from an administrator PowerShell, your antivirus is blocking it: see [docs/antivirus.md](docs/antivirus.md).
+
 ## Commands
 
 | Command | Does |

@@ -88,3 +88,37 @@ export async function installHook(file = claudeSettingsPath()): Promise<'added' 
   await writePrivate(file, JSON.stringify(settings, null, 2) + '\n');
   return 'added';
 }
+
+/** Removes this install's SessionStart hook (exactly its command), leaving everything else. Returns how many were removed. */
+export async function removeHook(file = claudeSettingsPath()): Promise<number> {
+  const settings = await readSettings(file);
+  const groups = settings.hooks?.SessionStart;
+  if (!groups?.length) return 0;
+  const command = hookCommand();
+  let removed = 0;
+  for (const group of groups) {
+    const before = group.hooks?.length ?? 0;
+    group.hooks = (group.hooks ?? []).filter((h) => (typeof h.command === 'string' ? h.command.trim() : '') !== command);
+    removed += before - group.hooks.length;
+  }
+  if (!removed) return 0;
+  const kept = groups.filter((g) => g.hooks?.length);
+  if (kept.length) settings.hooks!.SessionStart = kept;
+  else delete settings.hooks!.SessionStart;
+  if (!Object.keys(settings.hooks!).length) delete settings.hooks;
+  await writePrivate(file, JSON.stringify(settings, null, 2) + '\n');
+  return removed;
+}
+
+/** Removes the "handover" MCP server if it points at this install. */
+export async function unregisterFromClaude(): Promise<'removed' | 'not-registered' | 'other-install' | 'no-claude'> {
+  const claude = Bun.which('claude');
+  if (!claude) return 'no-claude';
+  const current = await runProcess(claude, ['mcp', 'get', 'handover'], { timeoutMs: 20_000 }).catch(() => null);
+  if (!current || current.code !== 0) return 'not-registered';
+  const [exe] = selfCommand();
+  if (!current.stdout.includes(exe!)) return 'other-install';
+  const result = await runProcess(claude, ['mcp', 'remove', 'handover', '--scope', 'user'], { timeoutMs: 30_000 });
+  if (result.code !== 0) throw new Error(`claude mcp remove failed: ${result.stderr.trim() || result.stdout.trim()}`);
+  return 'removed';
+}

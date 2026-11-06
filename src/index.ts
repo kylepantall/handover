@@ -5,6 +5,7 @@ import { endpoint, loadConfig } from './config.ts';
 import { readFile } from 'node:fs/promises';
 import { runDoctor } from './doctor.ts';
 import { formatLink, linkInfo } from './link.ts';
+import { removeHook, unregisterFromClaude } from './claude.ts';
 import { paths } from './paths.ts';
 import { installService, serviceState, uninstallService } from './service.ts';
 import { runSetup } from './setup.ts';
@@ -37,6 +38,7 @@ Usage: handover <command>
   token                         Print the relay token / peer secret
   doctor [--json]               Check config, relay, service and Claude Code
   update [--check] [--ref R]    Install the latest version from GitHub
+  claude-unlink                 Remove this install's MCP server and SessionStart hook from Claude Code
   mcp                           MCP server over stdio; Claude Code starts this
   hook                          Claude Code SessionStart hook
 
@@ -150,6 +152,12 @@ async function main(argv: string[]): Promise<number | null> {
       return runDoctor(p, { json: o.json === true });
     case 'update':
       return runUpdate({ check: o.check === true, force: o.force === true, ref: str('ref') });
+    case 'claude-unlink': {
+      const mcp = await unregisterFromClaude();
+      console.log(`mcp: ${mcp}`);
+      console.log(`hook: ${(await removeHook()) > 0 ? 'removed' : 'none'}`);
+      return EXIT.ok;
+    }
     case 'link': {
       const info = linkInfo(await loadConfig(p));
       console.log(o.json ? JSON.stringify(info, null, 2) : formatLink(info));

@@ -29,12 +29,20 @@ jobs:
           ~/.local/bin/handover --version
           HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover setup --relay --agent ci --no-service
           HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover link
+      - name: Uninstall
+        if: runner.os != 'Windows'
+        run: |
+          bash -n scripts/uninstall.sh
+          HANDOVER_HOME="$RUNNER_TEMP/h" bash scripts/uninstall.sh
+          for p in ~/.local/bin/handover ~/.local/share/handover "$RUNNER_TEMP/h"; do
+            if [ -e "$p" ]; then echo "left behind: $p"; exit 1; fi
+          done
 
       - name: Parse PowerShell scripts
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          foreach ($f in 'scripts/install.ps1', 'scripts/build-windows.ps1') {
+          foreach ($f in 'scripts/install.ps1', 'scripts/uninstall.ps1', 'scripts/build-windows.ps1') {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
             if ($errors) { $errors; exit 1 }
@@ -96,5 +104,13 @@ jobs:
           if ((& $exe service status) -ne 'running') { & $exe service log; throw 'relay task is not running' }
           $xml = (& schtasks /Query /TN handover-relay /XML) -join "`n"
           if ($xml -match 'conhost|<Hidden>true') { throw 'logon task must not be hidden' }
-          & $exe service uninstall
-          if ((& $exe service status) -ne 'not-installed') { throw 'service uninstall failed' }
+          # Full removal, leaving a logon task in place for uninstall.ps1 to find.
+          & $exe service install
+          $env:HANDOVER_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'handover-install'
+          # Write-Host goes to the information stream (6), not the pipeline.
+          $out = & ./scripts/uninstall.ps1 6>&1 | Out-String
+          Write-Host $out
+          if ($out -match '\[FAIL\]') { throw 'uninstall.ps1 reported failures' }
+          cmd /c "schtasks /Query /TN handover-relay >nul 2>&1"
+          if ($LASTEXITCODE -eq 0) { throw 'uninstall.ps1 left the logon task' }
+          foreach ($p in $env:HANDOVER_INSTALL_DIR, $env:HANDOVER_HOME) { if (Test-Path $p) { throw "left behind: $p" } }

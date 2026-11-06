@@ -123,3 +123,21 @@ test('--version and token work from config', async () => {
   await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ token: 'abc' }));
   expect((await cli(['token'])).stdout.trim()).toBe('abc');
 });
+
+test('removeHook takes out only this install’s hook and tidies empty sections', async () => {
+  const { installHook, removeHook } = await import('../src/claude.ts');
+  const file = path.join(dir, 'settings.json');
+  const other = { hooks: [{ type: 'command', command: '/somewhere/else/handover hook' }] };
+  await fs.writeFile(file, JSON.stringify({ model: 'opus', hooks: { SessionStart: [other], Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } }));
+  await installHook(file); // already "present" via the other install's hook
+  expect(await removeHook(file)).toBe(0); // never removes another install's hook
+
+  await fs.writeFile(file, JSON.stringify({ model: 'opus', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } }));
+  await installHook(file);
+  expect(await removeHook(file)).toBe(1);
+  const settings = JSON.parse(await fs.readFile(file, 'utf8'));
+  expect(settings.model).toBe('opus');
+  expect(settings.hooks.SessionStart).toBeUndefined();
+  expect(settings.hooks.Stop).toHaveLength(1);
+  expect(await removeHook(file)).toBe(0);
+});
