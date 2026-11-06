@@ -33,15 +33,17 @@ export function linkInfo(config: Config): LinkInfo {
   // PowerShell single quotes are literal; double any quote inside.
   const ps = (s: string) => `'${s.replace(/'/g, "''")}'`;
   const sh = (s: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
-  const winInstall = `& ([scriptblock]::Create((irm ${raw('install.ps1')})))`;
-  const unixInstall = `curl -fsSL ${raw('install.sh')} | bash -s --`;
+  // The token travels in an environment variable, never as an argument: arguments
+  // are visible in process lists and recorded by antivirus behaviour monitors.
+  const winInstall = `$env:HANDOVER_TOKEN=${ps(token)}; & ([scriptblock]::Create((irm ${raw('install.ps1')})))`;
+  const unixInstall = `curl -fsSL ${raw('install.sh')} | HANDOVER_TOKEN=${sh(token)} bash -s --`;
 
   if (config.peer) {
     return {
       mode: 'peer',
       token,
-      unix: `${unixInstall} --peer --token ${sh(token)}`,
-      windows: `${winInstall} -Peer -Token ${ps(token)}`,
+      unix: `${unixInstall} --peer`,
+      windows: `${winInstall} -Peer`,
       note: 'Machines on the same network find each other automatically.',
     };
   }
@@ -50,8 +52,8 @@ export function linkInfo(config: Config): LinkInfo {
     mode: 'relay',
     url,
     token,
-    unix: `${unixInstall} --join ${sh(url)} --token ${sh(token)}`,
-    windows: `${winInstall} -Join ${ps(url)} -Token ${ps(token)}`,
+    unix: `${unixInstall} --join ${sh(url)}`,
+    windows: `${winInstall} -Join ${ps(url)}`,
     note: config.relay?.tunnel
       ? `From outside this network, swap the URL for the ${config.relay.tunnel} URL in: handover service log`
       : config.relay

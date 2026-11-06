@@ -13,7 +13,7 @@ import type { Paths } from './paths.ts';
 import { PeerBrowser } from './discovery.ts';
 import { formatLink, linkInfo } from './link.ts';
 import { generateToken } from './server.ts';
-import { installService, serviceSupported } from './service.ts';
+import { installService, serviceByDefault, serviceSupported } from './service.ts';
 import { validateAgent } from './store.ts';
 import { TUNNELS, type Config, type Tunnel } from './types.ts';
 
@@ -115,27 +115,29 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
     if ([opts.relay, opts.join, opts.peer].filter(Boolean).length > 1) throw new Error('use one of --relay, --join or --peer');
     const config: Config = { ...existing, agent: opts.agent ?? agentName(existing) };
     validateAgent(config.agent, 'agent name');
+    // Prefer HANDOVER_TOKEN: a --token argument shows up in process lists and antivirus logs.
+    const token = opts.token ?? (process.env.HANDOVER_TOKEN || undefined);
     if (opts.relay || opts.peer) {
       const port = opts.port ?? existing.relay?.port ?? DEFAULT_PORT;
       config.relay = { ...existing.relay, port, ...(opts.tunnel ? { tunnel: opts.tunnel } : {}) };
       config.url = `http://127.0.0.1:${port}`;
       // A relay token from a joined machine belongs to that relay, not to a new peer network.
       const reusable = opts.peer ? existing.peer && existing.token : existing.relay && existing.token;
-      config.token = opts.token ?? (reusable || generateToken());
+      config.token = token ?? (reusable || generateToken());
       if (opts.peer) config.peer = true;
       else delete config.peer;
     } else {
       if (validUrl(opts.join)) throw new Error(`invalid --join URL: ${opts.join}`);
-      if (!opts.token) throw new Error('--join needs --token');
+      if (!token) throw new Error('--join needs a token: set HANDOVER_TOKEN (or pass --token)');
       config.url = opts.join!.replace(/\/+$/, '');
-      config.token = opts.token;
+      config.token = token;
       delete config.relay;
       delete config.peer;
       const state = await probe({ url: config.url, token: config.token });
       if (state !== 'ok') console.warn(`warning: relay ${config.url} is ${state}; saved anyway`);
     }
     const runsRelay = Boolean(opts.relay || opts.peer);
-    await apply(p, config, { ...opts, service: runsRelay ? (opts.service ?? serviceSupported()) : false }, (m) => console.log(m));
+    await apply(p, config, { ...opts, service: runsRelay ? (opts.service ?? serviceByDefault()) : false }, (m) => console.log(m));
     if (opts.peer) {
       const found = await findPeers(config.token!, config.agent!);
       console.log(found.length ? `Peers on this network: ${found.join(', ')}` : 'No other peers seen yet.');
@@ -185,7 +187,12 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
       s.stop(found.length ? `Found: ${found.join(', ')}` : 'No peers seen yet (they may be off); continuing');
     }
     choices.service = serviceSupported()
-      ? bail(await ui.confirm({ message: 'Start this machine’s peer relay now and at every login? (needed to send handovers)', initialValue: true }))
+      ? bail(
+          await ui.confirm({
+            message: 'Also run this machine’s relay at every login? (Otherwise it runs while Claude Code or a handover command is open.)',
+            initialValue: serviceByDefault(),
+          })
+        )
       : false;
   } else if (role === 'relay') {
     const port = Number(
@@ -219,7 +226,12 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
     config.token = (existing.relay && !existing.peer && existing.token) || generateToken();
     delete config.peer;
     if (serviceSupported())
-      choices.service = bail(await ui.confirm({ message: 'Start the relay now and at every login?', initialValue: true }));
+      choices.service = bail(
+        await ui.confirm({
+          message: 'Run the relay at every login? (Otherwise it runs while Claude Code or a handover command is open.)',
+          initialValue: serviceByDefault(),
+        })
+      );
   } else {
     config.url = bail(
       await ui.text({ message: 'Relay URL', placeholder: 'http://192.168.1.20:7777', initialValue: existing.relay ? '' : existing.url, validate: validUrl })

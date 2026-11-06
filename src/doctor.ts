@@ -67,7 +67,8 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     const svc = await serviceState();
     if (svc === 'running') add('service', 'ok', 'relay runs at login');
     else if (svc === 'stopped') add('service', 'warn', 'installed but not running', `handover service restart (log: ${p.log})`);
-    else if (svc === 'not-installed') add('service', 'info', 'not installed; run handover serve yourself', 'handover service install');
+    else if (svc === 'not-installed')
+      add('service', 'info', 'not installed: the relay runs inside handover (Claude Code’s MCP server, wait, worker) while one is open', 'handover service install');
     else add('service', 'info', 'no service manager here; run handover serve yourself');
     if (config.relay.tunnel && !Bun.which(config.relay.tunnel))
       add('tunnel', 'fail', `${config.relay.tunnel} not installed`, config.relay.tunnel === 'tailscale' ? 'brew install tailscale' : 'brew install cloudflared');

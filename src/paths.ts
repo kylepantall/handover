@@ -21,7 +21,7 @@ export const isWindows = process.platform === 'win32';
  * Full paths to Windows system programs. Windows searches the working
  * directory before PATH, so a bare `schtasks.exe` could run a planted copy.
  */
-export function windowsSystem(program: 'schtasks.exe' | 'tar.exe' | 'conhost.exe'): string {
+export function windowsSystem(program: 'schtasks.exe' | 'tar.exe'): string {
   return win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', program);
 }
 

@@ -31,9 +31,10 @@ Usage: bash install.sh [options] [REF]
 Installs $HANDOVER_REPO (branch, tag or commit; default main) under
 ~/.local/share/handover with a launcher in ~/.local/bin, then runs setup.
 
-  --peer [--token T]      Peer-to-peer on this network (no questions; omit --token on the first machine)
+  --peer                  Peer-to-peer on this network (no questions). Other machines: set
+                          HANDOVER_TOKEN to the secret (handover link prints the command)
   --relay                 Make this machine the relay (no questions)
-  --join URL --token T    Connect this machine to a relay (no questions)
+  --join URL              Connect this machine to a relay (token in HANDOVER_TOKEN)
   --agent NAME            Agent name for this machine (default: hostname)
   --claude                Register the MCP server and SessionStart hook with Claude Code
   --no-setup              Install only; run "handover setup" later
@@ -51,7 +52,13 @@ main() {
       --no-setup) run_setup=false ;;
       --relay | --peer) setup_args+=("$1"); has_mode=true ;;
       --claude) setup_args+=(--claude --hook); claude=true ;;
-      --join | --token | --agent)
+      --token)
+        # Kept for old links; hand it to setup through the environment, not argv.
+        [[ $# -ge 2 ]] || { printf '%s needs a value.\n' "$1" >&2; return 1; }
+        export HANDOVER_TOKEN="$2"
+        shift
+        ;;
+      --join | --agent)
         [[ $# -ge 2 ]] || { printf '%s needs a value.\n' "$1" >&2; return 1; }
         [[ "$1" != --join ]] || has_mode=true
         setup_args+=("$1" "$2")

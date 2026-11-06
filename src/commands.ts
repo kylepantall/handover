@@ -9,10 +9,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { RelayError } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, saveConfig } from './config.ts';
 import { connect } from './connect.ts';
-import { advertise } from './discovery.ts';
+import { ensureLocalRelay, hostRelay, keepLocalRelay, stopHosting } from './host.ts';
 import type { Paths } from './paths.ts';
-import { generateToken, lanAddresses, startServer, startTunnel } from './server.ts';
-import { isTerminal, Store } from './store.ts';
+import { generateToken, lanAddresses, startTunnel } from './server.ts';
+import { isTerminal } from './store.ts';
 import { buildMcpServer, briefing } from './tools.ts';
 import { STATUS, TUNNELS, type Task, type TaskStatus, type Tunnel } from './types.ts';
 
@@ -65,18 +65,22 @@ export async function serve(p: Paths, o: ServeOptions): Promise<void> {
   const tunnel = (o.tunnel ?? relay.tunnel) as Tunnel | undefined;
   if (tunnel && !TUNNELS.includes(tunnel)) throw new Error(`unknown tunnel "${tunnel}" (use ${TUNNELS.join(' or ')})`);
   const data = o.data ?? relay.data ?? p.tasks;
-  const store = new Store({
-    file: data === 'none' ? null : path.resolve(data),
-    leaseMs: (o.leaseSeconds ?? relay.leaseSeconds ?? 600) * 1000,
-    maxAttempts: o.maxAttempts ?? relay.maxAttempts ?? 3,
-    retentionMs: (o.retentionHours ?? relay.retentionHours ?? 24) * 3_600_000,
-  });
-  const { server } = await startServer({ port, host: o.host ?? relay.host ?? '0.0.0.0', token, store });
-  const unadvertise = config.peer ? advertise({ port, agent: agentName(config), token }) : null;
+  // Claude Code's MCP server may already host the relay. Stand by and take over
+  // when it exits, rather than failing (a login service would restart-loop).
+  let hosted;
+  for (let announced = false; ; ) {
+    try {
+      hosted = await hostRelay(p, config, { ...o, port, token });
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw err;
+      if (!announced) console.log('Another handover process is hosting the relay; standing by to take over', { port });
+      announced = true;
+      await Bun.sleep(5_000);
+    }
+  }
   const shutdown = async () => {
-    store.flush();
-    server.close();
-    await unadvertise?.().catch(() => {});
+    await hosted.stop();
     process.exit(EXIT.ok);
   };
   process.on('SIGINT', shutdown);
@@ -116,6 +120,9 @@ export interface WaitOptions {
 }
 
 export async function wait(p: Paths, o: WaitOptions): Promise<number> {
+  const config = await loadConfig(p);
+  // This machine's relay holds new tasks in relay and peer mode: host it here if nothing else is.
+  await ensureLocalRelay(p, config);
   const { api, agent, peer } = await client(p);
   const context = o.contextFile ? await fs.readFile(o.contextFile, 'utf8') : (o.context ?? '');
 
@@ -125,7 +132,7 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
       .create({ id, objective: o.objective, context, from: agent, to: o.to, priority: o.priority })
       .catch((err: Error) => {
         // Peer mode keeps new tasks on this machine's own relay.
-        if (peer && !(err instanceof RelayError)) throw new Error('this machine’s peer relay is not running: handover service install');
+        if (peer && !(err instanceof RelayError)) throw new Error('could not reach or host this machine’s relay: see handover doctor');
         throw err;
       });
     id = task.id;
@@ -164,6 +171,8 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
     } catch (err) {
       if (err instanceof RelayError && err.status === 404) throw err;
       log('relay unreachable, retrying', { error: (err as Error).message });
+      // If the process hosting our relay exited, take over (the queue is on disk).
+      await ensureLocalRelay(p, config).catch(() => {});
       await Bun.sleep(backoff);
       backoff = Math.min(backoff * 2, 15_000);
     }
@@ -214,6 +223,7 @@ export async function worker(p: Paths, o: WorkerOptions): Promise<number> {
     console.error('worker needs --exec "<agent command>"');
     return EXIT.usage;
   }
+  keepLocalRelay(p, await loadConfig(p));
   const { api, agent: configured, label } = await client(p);
   const agent = o.agent ?? configured;
   const leaseMs = o.leaseSeconds ? o.leaseSeconds * 1000 : undefined;
@@ -266,6 +276,15 @@ export async function list(p: Paths, o: { status?: string; for?: string }): Prom
 }
 
 export async function mcp(p: Paths): Promise<void> {
+  const config = await loadConfig(p);
   const { api, agent } = await client(p);
+  // Claude Code keeps this process alive while it's open, which makes it a natural
+  // host for this machine's relay: no login service needed.
+  keepLocalRelay(p, config);
+  // A hosted relay would keep the process alive after Claude Code closes our stdin.
+  process.stdin.once('end', async () => {
+    await stopHosting();
+    process.exit(EXIT.ok);
+  });
   await buildMcpServer(api, { agentName: agent }).connect(new StdioServerTransport());
 }

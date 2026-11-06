@@ -21,11 +21,14 @@ test('without HANDOVER_HOME the service uses the default folder', () => {
   expect(plist()).toContain('<key>PATH</key>');
 });
 
-test('the Windows logon task passes the data folder and log, hides its console, and has no time limit', () => {
+test('the Windows logon task passes the data folder and log, is not hidden, and has no time limit', () => {
   process.env.HANDOVER_HOME = '/tmp/hand over';
   const xml = taskXml();
-  expect(xml).toContain('conhost.exe</Command>');
-  expect(xml).toMatch(/--headless .* serve --home "\/tmp\/hand over" --log /);
+  // Hidden tasks launched through conhost --headless are what antivirus flags as persistence.
+  expect(xml).not.toContain('conhost');
+  expect(xml).not.toContain('--headless');
+  expect(xml).not.toContain('<Hidden>');
+  expect(xml).toMatch(/<Arguments>[^<]*serve --home "\/tmp\/hand over" --log /);
   expect(xml).toContain('<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>');
   expect(xml).toContain('<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>');
   expect(xml).toContain('<LogonTrigger>');

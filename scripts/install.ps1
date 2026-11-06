@@ -3,7 +3,7 @@
 # your user PATH). Then runs "handover setup".
 #
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1)))
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Peer -Token '<secret>'
+#   $env:HANDOVER_TOKEN='<secret>'; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Peer
 #
 # HANDOVER_RELEASE_DIR installs from a folder holding the zip and SHA256SUMS
 # (used by CI) instead of downloading.
@@ -30,18 +30,18 @@ function Write-Info([string]$Text) { Write-Host "    $Text" }
 function Install-Handover {
   $repo = if ($env:HANDOVER_REPO) { $env:HANDOVER_REPO } else { 'kylepantall/handover' }
   if ($Help) {
-    Write-Host 'Usage: install.ps1 [-Peer [-Token T] | -Relay | -Join URL -Token T] [-Agent NAME] [-Claude] [-NoSetup] [-Version x.y.z]'
+    Write-Host 'Usage: [$env:HANDOVER_TOKEN=T;] install.ps1 [-Peer | -Relay | -Join URL] [-Agent NAME] [-Claude] [-NoSetup] [-Version x.y.z]'
     Write-Host "Installs a $repo release (default latest) under %LOCALAPPDATA%\handover\app and adds it to your user PATH."
-    Write-Host '  -Peer [-Token T]    Peer-to-peer on this network (omit -Token on the first machine)'
+    Write-Host '  -Peer               Peer-to-peer on this network (other machines: set $env:HANDOVER_TOKEN first)'
     Write-Host '  -Relay              Make this machine the relay'
-    Write-Host '  -Join URL -Token T  Connect to a relay'
+    Write-Host '  -Join URL           Connect to a relay (token in $env:HANDOVER_TOKEN)'
     Write-Host '  -Claude             Add the MCP server and SessionStart hook to Claude Code'
     return
   }
   if ($Version -ne 'latest' -and $Version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $Version" }
   $modes = @(@([bool]$Peer, [bool]$Relay, [bool]$Join) | Where-Object { $_ })
   if ($modes.Count -gt 1) { throw 'Use one of -Peer, -Relay or -Join.' }
-  if ($Join -and -not $Token) { throw '-Join needs -Token.' }
+  if ($Join -and -not $Token -and -not $env:HANDOVER_TOKEN) { throw '-Join needs the relay token: set $env:HANDOVER_TOKEN (handover link prints the command).' }
   $label = if ($env:HANDOVER_RELEASE_DIR) { $env:HANDOVER_RELEASE_DIR } elseif ($Version -eq 'latest') { "$repo (latest release)" } else { "$repo v$Version" }
   Write-Host "handover installer - $label"
 
@@ -121,7 +121,8 @@ function Install-Handover {
     if ($Peer) { $setupArgs += '--peer' }
     if ($Relay) { $setupArgs += '--relay' }
     if ($Join) { $setupArgs += @('--join', $Join) }
-    if ($Token) { $setupArgs += @('--token', $Token) }
+    # The token reaches setup through the environment, never handover.exe's command line.
+    if ($Token) { $env:HANDOVER_TOKEN = $Token }
     if ($Agent) { $setupArgs += @('--agent', $Agent) }
     $hasMode = $Peer -or $Relay -or [bool]$Join
     if ($Claude) { $setupArgs += @('--claude', '--hook') }
@@ -144,6 +145,8 @@ function Install-Handover {
     }
   } finally {
     Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+    # Setup saved the token to config; don't leave it in this PowerShell session.
+    Remove-Item Env:HANDOVER_TOKEN -ErrorAction SilentlyContinue
   }
 }
 

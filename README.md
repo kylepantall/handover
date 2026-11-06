@@ -31,7 +31,7 @@ First machine:
 
 Then run **`handover link`** on it: it prints the exact command for every other machine, macOS/Linux and Windows, with the secret filled in.
 
-Each machine runs a small relay at login holding the tasks it creates, and announces itself on the network. Agents see and work on tasks from every peer.
+Each machine runs a small relay holding the tasks it creates (inside handover while Claude Code or a handover command is open, or as a login service), and announces itself on the network. Agents see and work on tasks from every peer.
 
 ### Relay
 
@@ -45,9 +45,9 @@ Running the installer with no options starts the guided `handover setup`, which 
 
 | Installer option (`install.sh` / `install.ps1`) | Does |
 |---|---|
-| `--peer [--token T]` / `-Peer [-Token T]` | Peer-to-peer; omit the token on the first machine |
+| `--peer` / `-Peer` | Peer-to-peer. Other machines get the secret via `HANDOVER_TOKEN` (`handover link` prints the full command) |
 | `--relay` / `-Relay` | Make this machine the relay |
-| `--join URL --token T` / `-Join URL -Token T` | Connect to a relay |
+| `--join URL` / `-Join URL` | Connect to a relay (token in `HANDOVER_TOKEN`) |
 | `--agent NAME` / `-Agent NAME` | Agent name (default: hostname) |
 | `--claude` / `-Claude` | Add the MCP server and SessionStart hook to Claude Code |
 | `--no-setup` / `-NoSetup` | Install only |
@@ -56,10 +56,10 @@ Running the installer with no options starts the guided `handover setup`, which 
 | | macOS / Linux | Windows |
 |---|---|---|
 | Installs | Source + a private Bun (checksum-verified) in `~/.local/share/handover`, launcher in `~/.local/bin` | `handover.exe` from the latest release (checked against `SHA256SUMS`) in `%LOCALAPPDATA%\handover\app`, added to your PATH |
-| Relay at login | launchd / systemd `--user` | Task Scheduler (hidden) |
+| Relay | Login service by default (launchd / systemd `--user`) | Runs inside handover while Claude Code (or `wait` / `worker`) is open; login task is opt-in (`handover service install`) |
 | Config | `~/.config/handover` | `%APPDATA%\handover` |
 
-⚠️ Windows: the first time the relay starts, Windows Firewall asks whether to allow `handover.exe`. Allow **private networks** so other machines can reach it.
+⚠️ Windows: the first time the relay starts, Windows Firewall asks whether to allow `handover.exe`. Allow **private networks** so other machines can reach it. If antivirus flags it, see [docs/antivirus.md](docs/antivirus.md); releases are signed once [docs/signing.md](docs/signing.md) is set up.
 
 ## Commands
 
@@ -134,7 +134,7 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 
 ## ⚠️ Security
 
-- The token grants full access to the queue. Treat it like a password; the join command contains it.
+- The token grants full access to the queue. Treat it like a password; the `handover link` commands contain it (in `HANDOVER_TOKEN`, never as a command-line argument).
 - `?token=` in a URL may be logged by tunnel providers; prefer header auth where the client supports it.
 - Task context from another machine is untrusted input to your agent (prompt injection).
 - Agent names are self-declared: targeting routes work, it isn't access control.

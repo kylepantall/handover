@@ -1,12 +1,16 @@
 name: Release
 
 # Push a tag vX.Y.Z (matching package.json) to publish the Windows build.
+# handover.exe is Authenticode-signed with Azure Artifact Signing when the
+# ARTIFACT_SIGNING_* repository variables are set (see docs/signing.md);
+# otherwise the release is published unsigned.
 on:
   push:
     tags: ['v*']
 
 permissions:
   contents: write
+  id-token: write # OIDC login to Azure for signing
 
 jobs:
   windows:
@@ -23,16 +27,48 @@ jobs:
           if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match package.json $version" }
       - run: bun install --frozen-lockfile
       - run: bun test tests
-      - name: Build
+      - name: Compile
         shell: pwsh
-        run: ./scripts/build-windows.ps1
+        run: ./scripts/build-windows.ps1 -CompileOnly
+
+      - name: Azure login (signing)
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != ''
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign handover.exe
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\handover\handover.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: handover
+      - name: Check the signature
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != ''
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature dist/handover/handover.exe
+          Write-Host "$($sig.Status): $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "handover.exe signature is $($sig.Status)" }
+
       - name: Smoke test
         shell: pwsh
         run: |
+          # Run after signing: proves signing didn't break Bun's embedded app.
           ./dist/handover/handover.exe --version
           if ($LASTEXITCODE -ne 0) { throw 'handover.exe --version failed' }
           $scripts = Get-ChildItem dist/handover -Recurse -Include *.cmd, *.bat, *.ps1, *.vbs
           if ($scripts) { throw "Scripts in the release: $($scripts.FullName -join ', ')" }
+      - name: Package
+        shell: pwsh
+        run: ./scripts/build-windows.ps1 -PackageOnly
       - name: Release notes from CHANGELOG.md
         shell: bash
         run: |

@@ -35,19 +35,28 @@ export function serviceSupported(): boolean {
   return process.platform === 'darwin' || isWindows || (process.platform === 'linux' && Bun.which('systemctl') != null);
 }
 
+/**
+ * Whether setup turns the login service on unless told otherwise. Not on
+ * Windows: there the relay runs inside handover's MCP server instead, and a
+ * logon task is what antivirus behaviour engines score as persistence.
+ */
+export const serviceByDefault = (): boolean => serviceSupported() && !isWindows;
+
 /** Windows quoting for one argument of a command line (CommandLineToArgvW rules). */
 const winArg = (a: string) => (/^[^\s"]+$/.test(a) ? a : `"${a.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`);
 
 /**
- * Task Scheduler definition. Task actions can't set environment variables, so
- * the data folder is passed as `--home`. conhost --headless keeps the console
- * window from appearing at every logon. No battery or 72-hour limits, and it
- * restarts if it crashes.
+ * Task Scheduler definition (opt-in on Windows; by default the relay runs
+ * inside handover's MCP server while Claude Code is open). It is deliberately
+ * not hidden: a hidden logon task launched through conhost --headless is what
+ * antivirus behaviour engines flag as malware persistence. Task actions can't
+ * set environment variables, so the data folder is passed as `--home`. No
+ * battery or 72-hour limits, and it restarts if it crashes.
  */
 export function taskXml(): string {
   const [exe, ...args] = selfCommand('serve', '--home', paths().dir, '--log', paths().log);
   const user = process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : (process.env.USERNAME ?? userInfo().username);
-  const commandLine = ['--headless', exe!, ...args].map(winArg).join(' ');
+  const commandLine = args.map(winArg).join(' ');
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Handover relay (handover serve)</Description></RegistrationInfo>
@@ -60,9 +69,8 @@ export function taskXml(): string {
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <Hidden>true</Hidden>
   </Settings>
-  <Actions Context="Author"><Exec><Command>${xml(windowsSystem('conhost.exe'))}</Command><Arguments>${xml(commandLine)}</Arguments></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>${xml(exe!)}</Command><Arguments>${xml(commandLine)}</Arguments></Exec></Actions>
 </Task>
 `;
 }

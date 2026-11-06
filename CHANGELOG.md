@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0
+
+Changes after Bitdefender flagged v0.5.0 on Windows (see docs/antivirus.md).
+
+- ⚠️ No hidden logon task. The relay now runs inside handover itself (Claude Code's MCP server, `wait`, `worker`) whenever one is open; another process takes over if it exits, and the queue survives on disk.
+- ⚠️ Login service is opt-in on Windows and visible (no `conhost --headless`). macOS/Linux still default to it. `serve` stands by instead of failing if another handover process already hosts the relay.
+- ⚠️ Secrets stay off command lines: `handover link`, `install.sh` and `install.ps1` pass the token in `HANDOVER_TOKEN`. `--token` / `-Token` still work but are converted to the environment variable before reaching setup.
+- Release workflow signs `handover.exe` with Azure Artifact Signing when configured (docs/signing.md).
+
 ## 0.5.0
 
 - Windows 11: `install.ps1` installs a compiled `handover.exe` from GitHub Releases (checked against `SHA256SUMS`), adds it to your user PATH and runs setup. `-Peer`, `-Relay`, `-Join`, `-Token`, `-Agent`, `-Claude`.
