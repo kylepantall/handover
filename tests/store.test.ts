@@ -106,6 +106,18 @@ test('state persists across restarts', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('every change is on disk at once, so a killed process loses nothing', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'handover-store-'));
+  const file = path.join(dir, 'tasks.json');
+  const s = new Store({ file });
+  s.create({ id: 'now', objective: 'x' });
+  // No flush() and no waiting: a fresh store (the next host) already sees it.
+  expect(new Store({ file }).get('now').status).toBe(STATUS.PENDING);
+  s.claim('now', { by: 'a' });
+  expect(new Store({ file }).get('now').status).toBe(STATUS.CLAIMED);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('finished tasks are pruned after retention', () => {
   const now = clock();
   const s = new Store({ now, retentionMs: 1000 });

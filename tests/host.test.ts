@@ -82,7 +82,8 @@ test('when the hosting process exits, a waiting process takes over and the queue
   const waiter = run(['wait', '--objective', 'survive the host', '--json', '--to', 'nobody-yet']);
   const id = await until(() => waiter.stderr().match(/HANDOVER_ID=(\S+)/)?.[1]);
 
-  host.child.kill('SIGTERM');
+  // A hard kill, like Windows' TerminateProcess: no shutdown hook gets to save anything.
+  host.child.kill('SIGKILL');
   await host.done;
   // The waiter notices the relay is gone and hosts it, reloading the task from disk.
   await until(() => waiter.stderr().includes('hosting the relay in this process'));

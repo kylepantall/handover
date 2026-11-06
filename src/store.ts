@@ -86,7 +86,6 @@ export class Store {
   #tasks = new Map<string, Task>();
   #waiters = new Map<string, Set<(t: Task) => void>>();
   #seq = 0;
-  #saveTimer: ReturnType<typeof setTimeout> | null = null;
   readonly #file: string | null;
   readonly #now: () => number;
   readonly #leaseMs: number;
@@ -221,11 +220,9 @@ export class Store {
     });
   }
 
-  /** Writes state to disk now (call on shutdown). */
+  /** Writes state to disk now. */
   flush(): void {
     if (!this.#file) return;
-    if (this.#saveTimer) clearTimeout(this.#saveTimer);
-    this.#saveTimer = null;
     fs.mkdirSync(path.dirname(this.#file), { recursive: true, mode: 0o700 });
     const tmp = `${this.#file}.${process.pid}.tmp`;
     const state = { version: STATE_VERSION, seq: this.#seq, tasks: [...this.#tasks.values()] };
@@ -258,16 +255,13 @@ export class Store {
   }
 
   #changed(): void {
-    // Debounced so bursts of updates cost one write.
-    if (!this.#file || this.#saveTimer) return;
-    this.#saveTimer = setTimeout(() => {
-      try {
-        this.flush();
-      } catch (err) {
-        console.error('state save failed', { file: this.#file, error: (err as Error).message });
-      }
-    }, 100);
-    this.#saveTimer.unref?.();
+    // Written immediately, not debounced: on Windows a killed process gets no
+    // shutdown hook, so anything still waiting on a timer would be lost.
+    try {
+      this.flush();
+    } catch (err) {
+      console.error('state save failed', { file: this.#file, error: (err as Error).message });
+    }
   }
 
   #update(task: Task, patch: Partial<Task>): Task {
