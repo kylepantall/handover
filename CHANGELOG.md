@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1
+
+- Fix: the queue is written to disk on every change. On Windows a killed process gets no shutdown hook, so the newest task could be lost when the process hosting the relay was terminated.
+- v0.6.0 was tagged but never released (its Windows tests caught this); 0.6.1 includes everything listed under 0.6.0.
+
 ## 0.6.0
 
 Changes after Bitdefender flagged v0.5.0 on Windows (see docs/antivirus.md).
