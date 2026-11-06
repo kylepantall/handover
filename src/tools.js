@@ -13,7 +13,9 @@ const safe = (fn) => async (args) => {
   }
 };
 
-const brief = (t) => ({ id: t.id, objective: t.objective, status: t.status, from: t.from, createdAt: t.createdAt });
+const brief = (t) => ({ id: t.id, objective: t.objective, status: t.status, priority: t.priority, to: t.to, from: t.from, createdAt: t.createdAt });
+const toMs = (seconds) => (seconds == null ? undefined : seconds * 1000);
+const leaseSeconds = z.number().int().positive().max(86_400).optional().describe('Lease length in seconds (default set by the relay)');
 
 export function briefing(task) {
   return [
@@ -28,24 +30,40 @@ export function briefing(task) {
     `## When finished`,
     `Call the \`handover_complete\` tool with id "${task.id}", your final output, and any files`,
     `(utf8 text, or base64 for binary). Use status "failed" with an explanation if you cannot finish.`,
+    task.leaseExpiresAt
+      ? `Your claim expires at ${task.leaseExpiresAt}; call \`handover_renew\` for long work or the task returns to the queue.`
+      : '',
   ].join('\n');
 }
 
-/** Builds an MCP server whose tools operate on `api` (local store or remote relay). */
+/** Builds an MCP server whose tools operate on `api` (local store or remote relay) as `agentName`. */
 export function buildMcpServer(api, { agentName = 'mcp-client' } = {}) {
-  const server = new McpServer({ name: 'handover', version: '0.1.0' });
+  const server = new McpServer({ name: 'handover', version: '0.2.0' });
 
   server.registerTool(
     'handover_list',
     {
       title: 'List handovers',
-      description: 'List handover tasks waiting to be picked up (default: pending).',
+      description: 'List handover tasks you can pick up (default: pending), highest priority first.',
       inputSchema: { status: z.enum(['pending', 'claimed', 'success', 'failed', 'cancelled', 'all']).optional() },
       annotations: { readOnlyHint: true },
     },
     safe(async ({ status = 'pending' }) => {
-      const tasks = await api.list(status === 'all' ? undefined : status);
+      const tasks = await api.list({ status: status === 'all' ? undefined : status, agent: agentName });
       return text(tasks.length ? tasks.map(brief) : 'No handovers.');
+    }),
+  );
+
+  server.registerTool(
+    'handover_next',
+    {
+      title: 'Take the next handover',
+      description: 'Claim the highest-priority pending handover addressed to you (or anyone). Returns its briefing, or says the queue is empty.',
+      inputSchema: { leaseSeconds },
+    },
+    safe(async ({ leaseSeconds: s }) => {
+      const task = await api.claimNext({ by: agentName, leaseMs: toMs(s) });
+      return text(task ? briefing(task) : 'Queue is empty.');
     }),
   );
 
@@ -53,11 +71,23 @@ export function buildMcpServer(api, { agentName = 'mcp-client' } = {}) {
     'handover_claim',
     {
       title: 'Claim a handover',
-      description:
-        'Claim a pending handover by id and receive its objective and context. Then do the work and call handover_complete.',
-      inputSchema: { id: z.string() },
+      description: 'Claim a specific pending handover by id and receive its objective and context. Then do the work and call handover_complete.',
+      inputSchema: { id: z.string(), leaseSeconds },
     },
-    safe(async ({ id }) => text(briefing(await api.claim(id, agentName)))),
+    safe(async ({ id, leaseSeconds: s }) => text(briefing(await api.claim(id, { by: agentName, leaseMs: toMs(s) })))),
+  );
+
+  server.registerTool(
+    'handover_renew',
+    {
+      title: 'Renew a claim',
+      description: 'Extend your claim on a handover you are still working on, so it is not returned to the queue.',
+      inputSchema: { id: z.string(), leaseSeconds },
+    },
+    safe(async ({ id, leaseSeconds: s }) => {
+      const t = await api.renew(id, { by: agentName, leaseMs: toMs(s) });
+      return text({ id: t.id, leaseExpiresAt: t.leaseExpiresAt });
+    }),
   );
 
   server.registerTool(
@@ -75,8 +105,7 @@ export function buildMcpServer(api, { agentName = 'mcp-client' } = {}) {
     'handover_complete',
     {
       title: 'Complete a handover',
-      description:
-        'Finish a handover: send the output and any files back to the waiting client. This unblocks it immediately.',
+      description: 'Finish a handover: send the output and any files back to the waiting client. This unblocks it immediately.',
       inputSchema: {
         id: z.string(),
         output: z.string().describe('Final answer / summary for the waiting client'),
@@ -104,11 +133,17 @@ export function buildMcpServer(api, { agentName = 'mcp-client' } = {}) {
       title: 'Create a handover',
       description:
         'Delegate a task to another agent. Returns an id; a client can run `handover wait --id <id>` or you can poll handover_get.',
-      inputSchema: { objective: z.string(), context: z.string().optional(), id: z.string().optional() },
+      inputSchema: {
+        objective: z.string(),
+        context: z.string().optional(),
+        id: z.string().optional(),
+        to: z.string().optional().describe('Only this agent name may claim it'),
+        priority: z.number().int().min(-1000).max(1000).optional().describe('Higher is picked up first (default 0)'),
+      },
     },
-    safe(async ({ objective, context, id }) => {
-      const t = await api.create({ objective, context, id, from: agentName });
-      return text({ id: t.id, status: t.status });
+    safe(async ({ objective, context, id, to, priority }) => {
+      const t = await api.create({ objective, context, id, to, priority, from: agentName });
+      return text({ id: t.id, status: t.status, to: t.to, priority: t.priority });
     }),
   );
 

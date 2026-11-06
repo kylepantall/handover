@@ -12,21 +12,28 @@ export function httpApi({ url = process.env.HANDOVER_URL ?? 'http://127.0.0.1:77
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const err = new Error(data.error ?? `HTTP ${res.status}`);
+      const err = new Error(data?.error ?? `HTTP ${res.status}`);
       err.status = res.status;
+      err.code = data?.code;
       throw err;
     }
     return data;
   }
   const enc = encodeURIComponent;
+  const query = (params) => {
+    const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null)).toString();
+    return q ? `?${q}` : '';
+  };
   return {
     create: (input) => call('POST', '/tasks', input),
-    list: (status) => call('GET', `/tasks${status ? `?status=${enc(status)}` : ''}`),
+    list: ({ status, agent } = {}) => call('GET', `/tasks${query({ status, for: agent })}`),
     get: (id) => call('GET', `/tasks/${enc(id)}`),
-    claim: (id, by) => call('POST', `/tasks/${enc(id)}/claim`, { by }),
+    claim: (id, opts = {}) => call('POST', `/tasks/${enc(id)}/claim`, opts),
+    claimNext: (opts = {}) => call('POST', '/tasks/next', opts),
+    renew: (id, opts = {}) => call('POST', `/tasks/${enc(id)}/renew`, opts),
     complete: (id, result) => call('POST', `/tasks/${enc(id)}/complete`, result),
     cancel: (id) => call('POST', `/tasks/${enc(id)}/cancel`, {}),
-    wait: (id, timeoutMs = 25_000) => call('GET', `/tasks/${enc(id)}/wait?timeout=${timeoutMs}`),
+    wait: (id, timeoutMs = 25_000) => call('GET', `/tasks/${enc(id)}/wait${query({ timeout: timeoutMs })}`),
   };
 }
 
@@ -34,9 +41,11 @@ export function httpApi({ url = process.env.HANDOVER_URL ?? 'http://127.0.0.1:77
 export function localApi(store) {
   return {
     create: async (input) => store.create(input),
-    list: async (status) => store.list(status),
+    list: async (filter) => store.list(filter),
     get: async (id) => store.get(id),
-    claim: async (id, by) => store.claim(id, by),
+    claim: async (id, opts) => store.claim(id, opts),
+    claimNext: async (opts) => store.claimNext(opts),
+    renew: async (id, opts) => store.renew(id, opts),
     complete: async (id, result) => store.complete(id, result),
     cancel: async (id) => store.cancel(id),
     wait: (id, timeoutMs = 25_000) => store.wait(id, timeoutMs),

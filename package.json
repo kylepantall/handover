@@ -1,6 +1,6 @@
 {
   "name": "handover-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hand tasks between LLM agents across machines via MCP",
   "scripts": {
     "test": "node --test test/*.test.js"

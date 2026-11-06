@@ -137,6 +137,31 @@ test('worker auto-picks up and falls back to agent stdout', async () => {
   assert.equal(result.output, '1');
 });
 
+test('handover_next over MCP respects targeting and priority', async () => {
+  const headers = { authorization: `Bearer ${TOKEN}` };
+  for (const t of await (await fetch(`${url}/tasks?status=pending`, { headers })).json()) {
+    await fetch(`${url}/tasks/${t.id}/cancel`, { method: 'POST', headers });
+  }
+  const waiter = run(['wait', '--objective', 'for bob only', '--to', 'bob', '--priority', '1']);
+  const id = await until(() => waiter.stderr().match(/HANDOVER_ID=(\S+)/)?.[1]);
+
+  const alice = await httpClient(`${url}/mcp?token=${TOKEN}&agent=alice`);
+  await alice.callTool({ name: 'handover_create', arguments: { id: 'plain', objective: 'anyone' } });
+  assert.match((await alice.callTool({ name: 'handover_next', arguments: {} })).content[0].text, /Handover plain/);
+  assert.match((await alice.callTool({ name: 'handover_next', arguments: {} })).content[0].text, /empty/);
+
+  const bob = await httpClient(`${url}/mcp?token=${TOKEN}&agent=bob`);
+  const got = await bob.callTool({ name: 'handover_next', arguments: { leaseSeconds: 60 } });
+  assert.match(got.content[0].text, new RegExp(`Handover ${id}`));
+  assert.ok(!(await bob.callTool({ name: 'handover_renew', arguments: { id } })).isError);
+  assert.equal((await alice.callTool({ name: 'handover_renew', arguments: { id } })).isError, true);
+  await bob.callTool({ name: 'handover_complete', arguments: { id, output: 'hi alice' } });
+
+  assert.equal((await waiter.done).code, 0);
+  await alice.close();
+  await bob.close();
+});
+
 test('hook emits SessionStart context listing pending handovers', async () => {
   const mcp = await httpClient(`${url}/mcp?token=${TOKEN}`);
   const { id } = parse(await mcp.callTool({ name: 'handover_create', arguments: { objective: 'for hook' } }));

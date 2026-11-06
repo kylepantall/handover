@@ -41,7 +41,7 @@ function readJson(req) {
   });
 }
 
-export function startServer({ port = 7777, host = '0.0.0.0', token, store = new Store() } = {}) {
+export function startServer({ port = 7777, host = '0.0.0.0', token, store = new Store(), sweepMs = 5_000 } = {}) {
   const expected = digest(token);
   const api = localApi(store);
 
@@ -55,8 +55,9 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
     if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
     const body = await readJson(req);
     // Stateless: a fresh server+transport per request, so any client (ChatGPT, Claude, ...) can connect.
-    const agent = url.searchParams.get('agent') ?? req.headers['user-agent'] ?? 'mcp-client';
-    const server = buildMcpServer(api, { agentName: String(agent).slice(0, 64) });
+    // Agent identity for targeting/leases: ?agent=<name> or X-Handover-Agent header.
+    const agent = url.searchParams.get('agent') ?? req.headers['x-handover-agent'] ?? 'mcp-client';
+    const server = buildMcpServer(api, { agentName: String(agent) });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {
       transport.close();
@@ -77,10 +78,16 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
 
     const [, id, action] = parts;
     const m = req.method;
-    if (!id && m === 'GET') return send(res, 200, store.list(url.searchParams.get('status') ?? undefined).map(summarize));
+    const q = url.searchParams;
+    if (!id && m === 'GET') {
+      const filter = { status: q.get('status') ?? undefined, agent: q.has('for') ? q.get('for') : undefined };
+      return send(res, 200, store.list(filter).map(summarize));
+    }
     if (!id && m === 'POST') return send(res, 201, store.create(await readJson(req)));
+    if (id === 'next' && !action && m === 'POST') return send(res, 200, store.claimNext(await readJson(req)));
     if (id && !action && m === 'GET') return send(res, 200, store.get(id));
-    if (action === 'claim' && m === 'POST') return send(res, 200, store.claim(id, (await readJson(req)).by ?? null));
+    if (action === 'claim' && m === 'POST') return send(res, 200, store.claim(id, await readJson(req)));
+    if (action === 'renew' && m === 'POST') return send(res, 200, store.renew(id, await readJson(req)));
     if (action === 'complete' && m === 'POST') return send(res, 200, store.complete(id, await readJson(req)));
     if (action === 'cancel' && m === 'POST') return send(res, 200, store.cancel(id));
     if (action === 'wait' && m === 'GET') {
@@ -99,6 +106,14 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
     });
   });
   server.requestTimeout = MAX_WAIT_MS + 10_000;
+
+  store.sweep();
+  const sweeper = setInterval(() => store.sweep(), sweepMs);
+  sweeper.unref();
+  server.on('close', () => {
+    clearInterval(sweeper);
+    store.flush();
+  });
 
   return new Promise((resolve) => server.listen(port, host, () => resolve({ server, store })));
 }
