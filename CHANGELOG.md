@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3
+
+- Windows installer: adding handover to your user PATH is best-effort. If security software or policy blocks it (`UnauthorizedAccessException`), install and setup carry on, since Claude Code uses the full path.
+
 ## 0.6.2
 
 - `handover doctor`: a relay that isn't running right now is reported as information, not a failure. It starts on demand with Claude Code's MCP server, `wait` or `worker`; only an installed login service that isn't answering is a failure.

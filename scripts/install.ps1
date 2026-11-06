@@ -106,10 +106,19 @@ function Install-Handover {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $entries = @(($userPath -split ';') | Where-Object { $_ })
     if ($entries -notcontains $app) {
-      # Only write when something changed: writing flattens %VAR% entries.
-      [Environment]::SetEnvironmentVariable('Path', (($entries + $app) -join ';'), 'User')
+      # This session can always find it; the persistent PATH is best-effort.
       $env:Path = "$env:Path;$app"
-      Write-Info "Added $app to your user PATH (new terminals pick it up)."
+      try {
+        # Only write when something changed: writing flattens %VAR% entries.
+        [Environment]::SetEnvironmentVariable('Path', (($entries + $app) -join ';'), 'User')
+        Write-Info "Added $app to your user PATH (new terminals pick it up)."
+      } catch {
+        # Security software or policy can block writes to the user environment.
+        # Claude Code and setup use the full path, so nothing depends on PATH.
+        Write-Info "Could not add $app to your user PATH ($($_.Exception.InnerException.Message))."
+        Write-Info "handover still works: Claude Code uses the full path. In a terminal, run: & '$exe'"
+        Write-Info 'or add the folder in Settings > System > About > Advanced system settings > Environment Variables.'
+      }
     }
 
     if ($hadTask) {
