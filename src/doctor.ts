@@ -51,7 +51,11 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     const state = await probe(ep);
     if (state === 'ok') add('relay', 'ok', `${ep.url} reachable, token accepted`);
     else if (state === 'unauthorized') add('relay', 'fail', `${ep.url} rejected the token`, 'handover setup --join <url> --token <token>');
-    else add('relay', 'fail', `${ep.url} unreachable`, config.relay ? 'handover service install' : 'Is the relay running?');
+    else if (!config.relay) add('relay', 'fail', `${ep.url} unreachable`, 'Is the relay running?');
+    else if (['running', 'stopped'].includes(await serviceState()))
+      add('relay', 'fail', `${ep.url} not answering, but the login service is installed`, `handover service restart (log: ${p.log})`);
+    // Hosted on demand: not running is the normal idle state, not a failure.
+    else add('relay', 'info', 'not running right now; starts with Claude Code’s MCP server, wait or worker', 'handover service install (to keep it running)');
   }
 
   if (config.peer && ep.token) {
