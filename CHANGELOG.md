@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.5
 
 - `scripts/uninstall.sh` and `scripts/uninstall.ps1`: one-command removal on every OS (service/logon task incl. the v0.5.0 hidden one, running relays, Claude Code MCP server and hook, PATH, app, config). `--keep-config` / `-KeepConfig`.
 - `handover claude-unlink`: removes this install's MCP server and SessionStart hook from Claude Code.
