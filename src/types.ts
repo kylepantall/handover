@@ -38,7 +38,12 @@ export interface Task {
   updatedAt: string;
   /** Peer mode: agent name of the peer holding this task (set by the client, not stored). */
   peer?: string;
+  /** 'ping': a connectivity check answered by handover itself, never shown to agents. */
+  kind?: TaskKind;
 }
+
+export const TASK_KINDS = ['task', 'ping'] as const;
+export type TaskKind = (typeof TASK_KINDS)[number];
 
 export type TaskSummary = Omit<Task, 'context' | 'output' | 'files' | 'seq'> & { fileCount: number };
 
@@ -49,17 +54,39 @@ export interface CreateInput {
   from?: string | null;
   to?: string | null;
   priority?: number | string;
+  kind?: TaskKind;
 }
 
 export interface ListFilter {
   status?: TaskStatus;
   /** Only tasks this agent may claim (unaddressed or addressed to it). */
   agent?: string;
+  /** Default 'task': pings are only for handover's own responders. */
+  kind?: TaskKind;
 }
 
 export interface ClaimOptions {
   by?: string | null;
   leaseMs?: number;
+  /** claimNext only; default 'task'. */
+  kind?: TaskKind;
+}
+
+/** A handover process that checked in with the host recently. */
+export interface AgentPresence {
+  agent: string;
+  version: string;
+  platform: string;
+  /** What is running there: relay, claude-code, worker, listen, test. */
+  via: string[];
+  lastSeen: string;
+}
+
+export interface Heartbeat {
+  agent: string;
+  version: string;
+  platform: string;
+  via: string;
 }
 
 export interface CompleteInput {
@@ -79,6 +106,10 @@ export interface Api {
   complete(id: string, result: CompleteInput): Promise<Task>;
   cancel(id: string): Promise<Task>;
   wait(id: string, timeoutMs?: number): Promise<Task>;
+  /** Presence: tell the host this agent is online. */
+  heartbeat(beat: Heartbeat): Promise<void>;
+  /** Agents seen recently, newest first. */
+  agents(): Promise<AgentPresence[]>;
 }
 
 export const TUNNELS = ['cloudflared', 'tailscale'] as const;

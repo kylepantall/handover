@@ -40,7 +40,7 @@ export function httpApi({ url, token }: Endpoint): Api {
   };
   return {
     create: (input) => call('POST', '/tasks', input),
-    list: ({ status, agent } = {}) => call('GET', `/tasks${query({ status, for: agent })}`),
+    list: ({ status, agent, kind } = {}) => call('GET', `/tasks${query({ status, for: agent, kind })}`),
     get: (id) => call('GET', `/tasks/${enc(id)}`),
     claim: (id, opts = {}) => call('POST', `/tasks/${enc(id)}/claim`, opts),
     claimNext: (opts = {}) => call<Task | null>('POST', '/tasks/next', opts),
@@ -48,6 +48,8 @@ export function httpApi({ url, token }: Endpoint): Api {
     complete: (id, result) => call('POST', `/tasks/${enc(id)}/complete`, result),
     cancel: (id) => call('POST', `/tasks/${enc(id)}/cancel`, {}),
     wait: (id, timeoutMs = 25_000) => call('GET', `/tasks/${enc(id)}/wait${query({ timeout: timeoutMs })}`),
+    heartbeat: async (beat) => void (await call('POST', '/agents', beat)),
+    agents: () => call('GET', '/agents'),
   };
 }
 
@@ -63,6 +65,8 @@ export function localApi(store: Store): Api {
     complete: async (id, result) => store.complete(id, result),
     cancel: async (id) => store.cancel(id),
     wait: (id, timeoutMs = 25_000) => store.wait(id, timeoutMs),
+    heartbeat: async (beat) => store.heartbeat(beat),
+    agents: async () => store.agents(),
   };
 }
 

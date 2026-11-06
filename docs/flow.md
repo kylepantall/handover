@@ -24,6 +24,16 @@ One machine is the **host**: it runs the relay that holds the queue. Every other
 | Share access | `handover link` | — (`link` on a client says to run it on the host) |
 | Health | `handover doctor`: relay up / idle, service | `handover doctor`: host found and token accepted |
 
+## Verify
+
+| Check | How |
+|---|---|
+| Just joined | `handover join` ends with a round trip through the host and lists who's online |
+| Every machine | `handover test`: host answers; round trip; round robin where each online machine pings every other (full grid of directed links, with timings). Exit 1 if any link fails; `--json` for scripts |
+| Presence | Every running handover process (host relay, Claude Code's MCP server, `worker`, `listen`) checks in with the host every 20 s; "online" means seen in the last 90 s |
+| Answering | Pings are system tasks addressed to one agent, answered by its running handover process, never shown to Claude, `list`, the hook or the worker. Unanswered pings are cancelled after 60 s |
+| A machine without Claude Code open | `handover listen` answers pings until stopped |
+
 ## Rules
 
 - Token: the host keeps its token across reruns. A machine switching from client to host gets a new token unless `HANDOVER_TOKEN` is set. A client keeps whatever token it joined with.

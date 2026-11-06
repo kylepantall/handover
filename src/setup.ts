@@ -13,7 +13,9 @@ import { existsSync } from 'node:fs';
 import { claudeRegistration, installHook, registerWithClaude } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
+import { connect } from './connect.ts';
 import { findHost } from './discovery.ts';
+import { pingAgent, startResponder } from './responder.ts';
 import { formatChecks, runChecks } from './doctor.ts';
 import { formatLink, linkInfo } from './link.ts';
 import type { Paths } from './paths.ts';
@@ -197,10 +199,29 @@ export async function runJoin(p: Paths, o: Omit<JoinOptions, 'interactive'>): Pr
   if (interactive) ui.intro('handover join');
   const say: Say = interactive ? (m) => ui.log.success(m) : (m) => console.log(m);
   const config = await becomeClient(p, { ...o, interactive }, say);
-  const done = `Joined the host at ${config.url}${config.discover ? ' (found on this network)' : ''} as ${config.agent}`;
+  const check = await roundTrip(p);
+  say(check);
+  const done = `Joined the host at ${config.url}${config.discover ? ' (found on this network)' : ''} as ${config.agent}. Check every machine: handover test`;
   if (interactive) ui.outro(done);
   else console.log(done);
   return 0;
+}
+
+/** After joining: a round trip to this machine through the host, and who's online. */
+async function roundTrip(p: Paths): Promise<string> {
+  const config = await loadConfig(p);
+  const { api, agent } = await connect(p, config);
+  const responder = startResponder(api, { agent, via: 'join' });
+  try {
+    const r = await pingAgent(api, agent, agent, { timeoutMs: 6_000 });
+    if (!r.ok) return `Round trip through the host failed: ${r.error}`;
+    const online = (await api.agents()).map((a) => a.agent).filter((a) => a !== agent);
+    return `Round trip through the host: ${r.ms} ms. Online: ${online.join(', ') || 'no other machines yet'}`;
+  } catch (err) {
+    return `Round trip through the host failed: ${(err as Error).message}`;
+  } finally {
+    responder.stop();
+  }
 }
 
 // ── setup: menu + compatibility flags ───────────────────────────────────
@@ -251,7 +272,8 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
 
   if (role === 'client') {
     const config = await becomeClient(p, { agent, interactive: true }, step);
-    ui.outro(`Joined the host at ${config.url} as ${config.agent}`);
+    step(await roundTrip(p));
+    ui.outro(`Joined the host at ${config.url} as ${config.agent}. Check every machine: handover test`);
     return 0;
   }
 

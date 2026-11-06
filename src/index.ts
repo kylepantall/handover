@@ -9,6 +9,7 @@ import { removeHook, unregisterFromClaude } from './claude.ts';
 import { paths } from './paths.ts';
 import { installService, serviceState, uninstallService } from './service.ts';
 import { isRelayUrl, runHost, runJoin, runSetup } from './setup.ts';
+import { runListen, runTest } from './test.ts';
 import { TUNNELS, type Tunnel } from './types.ts';
 import { runUpdate } from './update.ts';
 import { VERSION } from './version.ts';
@@ -23,6 +24,9 @@ Usage: handover <command>
   join [HOST_URL]               Join a host: asks for its token (or reads HANDOVER_TOKEN) and finds it on
                                 this network; HOST_URL only if it's elsewhere [--agent NAME] [--no-claude]
   setup                         Menu: host or join
+  test [--timeout SEC] [--json] Check this machine reaches the host, then a round robin: every online
+                                machine pings every other. Exits 1 if any link fails
+  listen                        Answer test pings on a machine without Claude Code open
   wait --objective TEXT         Create a handover and block until an agent completes it
         [--context TEXT | --context-file PATH] [--to AGENT] [--priority N]
         [--id ID] [--out DIR] [--timeout SEC] [--json]
@@ -56,6 +60,7 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
   serve: { port: s, host: s, token: s, tunnel: s, data: s, lease: s, 'max-attempts': s, retention: s, log: s, home: s },
   link: { json: b },
   join: { agent: s, 'no-claude': b },
+  test: { timeout: s, json: b },
   doctor: { json: b },
   update: { check: b, force: b, ref: s },
 };
@@ -127,6 +132,10 @@ async function main(argv: string[]): Promise<number | null> {
         );
       return runJoin(p, { url, agent: str('agent'), claude: o['no-claude'] ? false : undefined });
     }
+    case 'test':
+      return runTest(p, { json: o.json === true, timeoutSeconds: num(o.timeout, 'timeout') });
+    case 'listen':
+      return runListen(p);
     case 'serve':
       await serve(p, {
         port: num(o.port, 'port'),

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+- `handover test`: checks the host answers, does a round trip through it, then a round robin where every online machine pings every other, giving the full grid of directed links with timings. Exits 1 if any link fails; `--json`.
+- `handover join` ends with a round trip through the host and lists who's online.
+- Presence: the host relay, Claude Code's MCP server, `worker` and the new `handover listen` check in with the host and answer ping tasks for their agent. Pings never reach Claude, `list`, the hook or the worker.
+
 ## 0.7.0
 
 Setup is now host / client ([docs/flow.md](docs/flow.md)):

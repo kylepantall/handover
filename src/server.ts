@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { Store, HandoverError, summarize, type ErrorCode } from './store.ts';
 import { localApi } from './client.ts';
 import { buildMcpServer } from './tools.ts';
-import type { TaskStatus, Tunnel } from './types.ts';
+import type { TaskKind, TaskStatus, Tunnel } from './types.ts';
 
 const MAX_BODY = 25 * 1024 * 1024;
 const MAX_WAIT_MS = 60_000;
@@ -85,13 +85,24 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
     if (url.pathname === '/health') return send(res, 200, { ok: true });
     if (!authorized(req, url)) return send(res, 401, { error: 'unauthorized' });
     if (parts[0] === 'mcp' && parts.length === 1) return handleMcp(req, res, url);
+    if (parts[0] === 'agents' && parts.length === 1) {
+      if (req.method === 'POST') {
+        store.heartbeat((await readJson(req)) as any);
+        return send(res, 200, { ok: true });
+      }
+      if (req.method === 'GET') return send(res, 200, store.agents());
+    }
     if (parts[0] !== 'tasks') return send(res, 404, { error: 'not found' });
 
     const [, id, action] = parts;
     const m = req.method;
     const q = url.searchParams;
     if (!id && m === 'GET') {
-      const filter = { status: (q.get('status') ?? undefined) as TaskStatus | undefined, agent: q.get('for') ?? undefined };
+      const filter = {
+        status: (q.get('status') ?? undefined) as TaskStatus | undefined,
+        agent: q.get('for') ?? undefined,
+        kind: (q.get('kind') ?? undefined) as TaskKind | undefined,
+      };
       return send(res, 200, store.list(filter).map(summarize));
     }
     if (!id && m === 'POST') return send(res, 201, store.create((await readJson(req)) as any));

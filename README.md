@@ -34,7 +34,22 @@ curl -fsSL https://raw.githubusercontent.com/kylepantall/handover/main/scripts/i
 $env:HANDOVER_TOKEN='<token>'; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kylepantall/handover/main/scripts/install.ps1))) -Join
 ```
 
-Without `HANDOVER_TOKEN` it asks for the token. Already installed? `handover join`.
+Without `HANDOVER_TOKEN` it asks for the token. Already installed? `handover join`. Joining ends with a round trip through the host.
+
+**3. Check everything:** `handover test` on any machine. Every machine with Claude Code open (or `handover worker` / `handover listen` running) takes part:
+
+```
+✓ host      http://192.168.1.20:7777 answers, token accepted
+✓ roundtrip pc → host → pc: 526 ms
+
+Online: pc (claude-code), mac (claude-code), hub (relay)
+
+Round robin:
+  ✓ pc → mac   1008 ms
+  ✓ mac → pc   61 ms
+  …
+All connections work.
+```
 
 | Installer option (`install.sh` / `install.ps1`) | Does |
 |---|---|
@@ -75,6 +90,8 @@ Keep the config and queue (to reinstall with the same secret): add `-s -- --keep
 | `handover host` | Make this machine the host; prints the token and join commands |
 | `handover join [HOST_URL]` | Join a host: asks for its token and finds it on this network |
 | `handover setup` | Menu: host or join |
+| `handover test` | Prove the machines talk: host check, a round trip, then a round robin where every online machine pings every other. Exits 1 if any link fails |
+| `handover listen` | Answer test pings on a machine without Claude Code open |
 | `handover wait --objective "…"` | Create a handover and block until it's done |
 | `handover worker --exec "claude -p"` | Auto-pickup: run an agent on each new handover |
 | `handover list` | Show the queue |

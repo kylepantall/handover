@@ -5,6 +5,9 @@ import { replaceFileSync } from './paths.ts';
 import {
   FAILURE,
   STATUS,
+  type AgentPresence,
+  type Heartbeat,
+  type TaskKind,
   type ClaimOptions,
   type CompleteInput,
   type CreateInput,
@@ -67,6 +70,13 @@ function validatePriority(value: unknown): number {
 /** Highest priority first, then oldest first. */
 const byQueueOrder = (a: Task, b: Task) => b.priority - a.priority || a.seq - b.seq;
 
+const kindOf = (t: Task): TaskKind => t.kind ?? 'task';
+/** Unanswered pings are cancelled after this; answered ones are deleted after PING_KEEP_MS. */
+export const PING_TTL_MS = 60_000;
+const PING_KEEP_MS = 5 * 60_000;
+/** An agent counts as online if it checked in within this long. */
+export const PRESENCE_TTL_MS = 90_000;
+
 /** A task is visible to `agent` when it is unaddressed or addressed to that agent. */
 const eligibleFor = (task: Task, agent: string | null) => !task.to || task.to === agent;
 
@@ -85,6 +95,7 @@ export interface StoreOptions {
  */
 export class Store {
   #tasks = new Map<string, Task>();
+  #presence = new Map<string, { beat: Heartbeat; seen: number; via: Map<string, number> }>();
   #waiters = new Map<string, Set<(t: Task) => void>>();
   #seq = 0;
   readonly #file: string | null;
@@ -102,8 +113,11 @@ export class Store {
     if (file) this.#load();
   }
 
-  create({ id, objective, context = '', from = null, to = null, priority = 0 }: CreateInput): Task {
+  create({ id, objective, context = '', from = null, to = null, priority = 0, kind = 'task' }: CreateInput): Task {
     if (typeof objective !== 'string' || !objective.trim()) throw new HandoverError('bad_request', 'objective is required');
+    if (kind !== 'task' && kind !== 'ping') throw new HandoverError('bad_request', 'kind must be task or ping');
+    // A ping checks one machine: it must say which.
+    if (kind === 'ping' && !to) throw new HandoverError('bad_request', 'a ping needs to');
     const taskId = id ?? randomBytes(6).toString('hex');
     if (!ID_RE.test(taskId) || RESERVED_IDS.has(taskId)) throw new HandoverError('bad_request', 'invalid id');
     if (this.#tasks.has(taskId)) throw new HandoverError('conflict', 'id already exists');
@@ -125,6 +139,7 @@ export class Store {
       files: [],
       createdAt: now,
       updatedAt: now,
+      ...(kind === 'ping' ? { kind } : {}),
     };
     this.#tasks.set(taskId, task);
     this.#changed();
@@ -132,9 +147,9 @@ export class Store {
   }
 
   /** Tasks in queue order. `agent` limits to tasks that agent may claim. */
-  list({ status, agent }: ListFilter = {}): Task[] {
+  list({ status, agent, kind = 'task' }: ListFilter = {}): Task[] {
     return [...this.#tasks.values()]
-      .filter((t) => (!status || t.status === status) && (agent === undefined || eligibleFor(t, agent)))
+      .filter((t) => kindOf(t) === kind && (!status || t.status === status) && (agent === undefined || eligibleFor(t, agent)))
       .sort(byQueueOrder);
   }
 
@@ -158,9 +173,9 @@ export class Store {
   }
 
   /** Atomically claims the highest-priority eligible pending task, or returns null. */
-  claimNext({ by = null, leaseMs }: ClaimOptions = {}): Task | null {
+  claimNext({ by = null, leaseMs, kind = 'task' }: ClaimOptions = {}): Task | null {
     const agent = validateAgent(by);
-    const [next] = this.list({ status: STATUS.PENDING, agent: agent ?? '' });
+    const [next] = this.list({ status: STATUS.PENDING, agent: agent ?? '', kind });
     return next ? this.claim(next.id, { by: agent, leaseMs }) : null;
   }
 
@@ -191,6 +206,16 @@ export class Store {
   sweep(): void {
     const now = this.#now();
     for (const task of this.#tasks.values()) {
+      if (kindOf(task) === 'ping') {
+        const age = now - Date.parse(task.createdAt);
+        if (isTerminal(task.status) && now - Date.parse(task.updatedAt) > PING_KEEP_MS) {
+          this.#tasks.delete(task.id);
+          this.#changed();
+        } else if (!isTerminal(task.status) && age > PING_TTL_MS) {
+          this.#update(task, { status: STATUS.CANCELLED, leaseExpiresAt: null }); // nobody answered
+        }
+        continue;
+      }
       if (task.status === STATUS.CLAIMED && Date.parse(task.leaseExpiresAt ?? '') <= now) {
         if (task.attempts >= this.#maxAttempts) {
           this.#update(task, { status: STATUS.FAILED, failureReason: FAILURE.LEASE_EXPIRED, leaseExpiresAt: null });
@@ -219,6 +244,33 @@ export class Store {
       const timer = setTimeout(() => done(this.#tasks.get(id) ?? task), timeoutMs);
       set.add(done);
     });
+  }
+
+  /** Presence: records that an agent's handover process is running. Not persisted. */
+  heartbeat(beat: Heartbeat): void {
+    const agent = validateAgent(beat.agent);
+    if (!agent) throw new HandoverError('bad_request', 'agent is required');
+    const now = this.#now();
+    const entry = this.#presence.get(agent) ?? { beat, seen: now, via: new Map<string, number>() };
+    entry.beat = { agent, version: String(beat.version ?? '').slice(0, 32), platform: String(beat.platform ?? '').slice(0, 32), via: '' };
+    entry.seen = now;
+    entry.via.set(String(beat.via ?? 'unknown').slice(0, 32), now);
+    this.#presence.set(agent, entry);
+  }
+
+  /** Agents that checked in within PRESENCE_TTL_MS, most recent first. */
+  agents(): AgentPresence[] {
+    const now = this.#now();
+    return [...this.#presence.values()]
+      .filter((e) => now - e.seen <= PRESENCE_TTL_MS)
+      .sort((a, b) => b.seen - a.seen)
+      .map((e) => ({
+        agent: e.beat.agent,
+        version: e.beat.version,
+        platform: e.beat.platform,
+        via: [...e.via].filter(([, t]) => now - t <= PRESENCE_TTL_MS).map(([v]) => v).sort(),
+        lastSeen: new Date(e.seen).toISOString(),
+      }));
   }
 
   /** Writes state to disk now. */

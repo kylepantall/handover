@@ -10,6 +10,7 @@ import { RelayError } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
 import { connect } from './connect.ts';
 import { ensureLocalRelay, hostRelay, keepLocalRelay, stopHosting } from './host.ts';
+import { startResponder } from './responder.ts';
 import type { Paths } from './paths.ts';
 import { generateToken, lanAddresses, startTunnel } from './server.ts';
 import { isTerminal } from './store.ts';
@@ -229,6 +230,7 @@ export async function worker(p: Paths, o: WorkerOptions): Promise<number> {
   keepLocalRelay(p, await loadConfig(p));
   const { api, agent: configured, label } = await client(p);
   const agent = o.agent ?? configured;
+  startResponder(api, { agent, via: 'worker' });
   const leaseMs = o.leaseSeconds ? o.leaseSeconds * 1000 : undefined;
   log('worker polling', { agent, relay: label });
   for (;;) {
@@ -284,6 +286,7 @@ export async function mcp(p: Paths): Promise<void> {
   // Claude Code keeps this process alive while it's open, which makes it a natural
   // host for this machine's relay: no login service needed.
   keepLocalRelay(p, config);
+  startResponder(api, { agent, via: 'claude-code' });
   // A hosted relay would keep the process alive after Claude Code closes our stdin.
   process.stdin.once('end', async () => {
     await stopHosting();

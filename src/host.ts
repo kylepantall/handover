@@ -9,7 +9,9 @@
 import type { Server } from 'node:http';
 import path from 'node:path';
 import { agentName, DEFAULT_PORT, roleOf } from './config.ts';
+import { localApi } from './client.ts';
 import { advertise } from './discovery.ts';
+import { startResponder } from './responder.ts';
 import type { Paths } from './paths.ts';
 import { startServer } from './server.ts';
 import { Store } from './store.ts';
@@ -47,6 +49,8 @@ export async function hostRelay(p: Paths, config: Config, opts: { host?: string;
   const { server } = await startServer({ port, host: opts.host ?? config.relay?.host ?? '0.0.0.0', token: opts.token, store });
   // Clients find the host by this announcement (docs/flow.md).
   const unadvertise = advertise({ port, agent: agentName(config), token: opts.token });
+  // The host answers pings itself while its relay runs, so it always shows as online.
+  const responder = startResponder(localApi(store), { agent: agentName(config), via: 'relay' });
   let stopped = false;
   return {
     server,
@@ -54,6 +58,7 @@ export async function hostRelay(p: Paths, config: Config, opts: { host?: string;
     async stop() {
       if (stopped) return;
       stopped = true;
+      responder.stop();
       store.flush();
       server.close();
       await unadvertise().catch(() => {});

@@ -141,3 +141,40 @@ test('rejects invalid input', () => {
   for (const name of ['../evil', 'a/b', '.bashrc'])
     expect(codeOf(() => s.complete('t', { output: '', files: [{ name, content: 'x' }] }))).toBe('bad_request');
 });
+
+test('pings are hidden from agents and claimable only by their addressee', () => {
+  const s = new Store();
+  s.create({ id: 'job', objective: 'real work' });
+  expect(codeOf(() => s.create({ objective: 'ping', kind: 'ping' }))).toBe('bad_request'); // needs `to`
+  s.create({ id: 'p', objective: 'ping', kind: 'ping', to: 'b' });
+  expect(s.list({ status: STATUS.PENDING }).map((t) => t.id)).toEqual(['job']);
+  expect(s.claimNext({ by: 'b' })?.id).toBe('job'); // the worker never gets pings
+  expect(s.claimNext({ by: 'a', kind: 'ping' })).toBeNull();
+  expect(s.claimNext({ by: 'b', kind: 'ping' })?.id).toBe('p');
+});
+
+test('unanswered pings are cancelled, answered ones cleaned up', () => {
+  const now = clock();
+  const s = new Store({ now });
+  s.create({ id: 'lost', objective: 'ping', kind: 'ping', to: 'gone' });
+  s.create({ id: 'done', objective: 'ping', kind: 'ping', to: 'b' });
+  s.complete('done', { output: '{}' });
+  now.advance(61_000);
+  s.sweep();
+  expect(s.get('lost').status).toBe(STATUS.CANCELLED);
+  now.advance(5 * 60_000);
+  s.sweep();
+  expect(codeOf(() => s.get('done'))).toBe('not_found');
+});
+
+test('presence: agents checked in recently, with everything running there', () => {
+  const now = clock();
+  const s = new Store({ now });
+  s.heartbeat({ agent: 'pc', version: '1', platform: 'win32/x64', via: 'claude-code' });
+  s.heartbeat({ agent: 'pc', version: '1', platform: 'win32/x64', via: 'worker' });
+  now.advance(60_000);
+  s.heartbeat({ agent: 'mac', version: '1', platform: 'darwin/arm64', via: 'relay' });
+  expect(s.agents().map((a) => [a.agent, a.via])).toEqual([['mac', ['relay']], ['pc', ['claude-code', 'worker']]]);
+  now.advance(60_000);
+  expect(s.agents().map((a) => a.agent)).toEqual(['mac']); // pc went quiet
+});
