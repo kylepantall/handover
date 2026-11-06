@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -140,4 +141,41 @@ test('removeHook takes out only this install’s hook and tidies empty sections'
   expect(settings.hooks.SessionStart).toBeUndefined();
   expect(settings.hooks.Stop).toHaveLength(1);
   expect(await removeHook(file)).toBe(0);
+});
+
+// join: run with no `claude` on PATH and --no-service, so tests never touch the
+// developer's real Claude Code config or login service.
+const isolated = (env: Record<string, string> = {}) => ({ PATH: path.dirname(process.execPath), ...env });
+
+test('join (no URL) joins peers with the secret from HANDOVER_TOKEN', async () => {
+  const { code, stdout } = await cli(['join', '--agent', 'pc', '--no-service'], isolated({ HANDOVER_TOKEN: 'peer-secret' }));
+  expect(code).toBe(0);
+  expect(stdout).toContain('handover join');
+  const config = await loadConfig(paths(dir));
+  expect(config).toMatchObject({ peer: true, token: 'peer-secret', agent: 'pc' });
+}, 20_000);
+
+test('join URL joins that relay', async () => {
+  const { server } = await startServer({ port: 0, host: '127.0.0.1', token: 'relay-secret' });
+  const addr = server.address();
+  const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  try {
+    const { code } = await cli(['join', url, '--no-service'], isolated({ HANDOVER_TOKEN: 'relay-secret' }));
+    expect(code).toBe(0);
+    const config = await loadConfig(paths(dir));
+    expect(config).toMatchObject({ url, token: 'relay-secret' });
+    expect(config.peer).toBeUndefined();
+  } finally {
+    server.close();
+  }
+});
+
+test('join refuses a secret on the command line and needs one from somewhere', async () => {
+  const onArgv = await cli(['join', 'my-secret-value', '--no-service'], isolated());
+  expect(onArgv.code).toBe(1);
+  expect(onArgv.stdout).toContain('HANDOVER_TOKEN');
+  expect(onArgv.stdout).not.toContain('my-secret-value');
+  const none = await cli(['join', '--no-service'], isolated()); // not a terminal, no env
+  expect(none.code).toBe(1);
+  expect(existsSync(paths(dir).config)).toBe(false);
 });

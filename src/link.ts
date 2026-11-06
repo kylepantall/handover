@@ -71,6 +71,10 @@ export function formatLink(info: LinkInfo): string {
     '',
     '  Windows (PowerShell):',
     `    ${info.windows}`,
+    '',
+    info.mode === 'peer'
+      ? '  handover already installed there? Run: handover join   (it asks for the secret)'
+      : `  handover already installed there? Run: handover join ${info.url}   (it asks for the token)`,
     ...(info.note ? ['', info.note] : []),
     '',
     'These contain the token: share them like a password.',

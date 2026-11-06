@@ -114,3 +114,5 @@ jobs:
           cmd /c "schtasks /Query /TN handover-relay >nul 2>&1"
           if ($LASTEXITCODE -eq 0) { throw 'uninstall.ps1 left the logon task' }
           foreach ($p in $env:HANDOVER_INSTALL_DIR, $env:HANDOVER_HOME) { if (Test-Path $p) { throw "left behind: $p" } }
+          # The last schtasks query above exits 1 (task gone, as expected); don't let it fail the step.
+          exit 0

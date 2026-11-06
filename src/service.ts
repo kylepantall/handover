@@ -12,7 +12,11 @@ import { DEFAULT_PORT, loadConfig } from './config.ts';
 import { isWindows, paths, windowsSystem } from './paths.ts';
 import { runProcess } from './process.ts';
 
-export type ServiceState = 'running' | 'stopped' | 'not-installed' | 'unsupported';
+/** 'legacy': the hidden conhost logon task v0.5.0 created (the pattern antivirus flagged). */
+export type ServiceState = 'running' | 'stopped' | 'not-installed' | 'unsupported' | 'legacy';
+
+/** True for v0.5.0's task: hidden, run through conhost --headless. */
+export const isLegacyTaskXml = (xml: string): boolean => /conhost|<Hidden>\s*true\s*<\/Hidden>/i.test(xml);
 
 const LABEL = 'com.kylepantall.handover';
 const UNIT = 'handover.service';
@@ -133,6 +137,18 @@ async function must(cmd: string, args: string[]): Promise<void> {
   if (r.code !== 0) throw new Error(`${cmd} ${args.join(' ')} failed: ${r.stderr.trim() || r.stdout.trim()}`);
 }
 
+/**
+ * Unloads the job and waits until launchd has finished: bootout returns before
+ * the job is gone, and loading it again meanwhile fails with
+ * "Bootstrap failed: 5: Input/output error".
+ */
+async function unloadLaunchd(): Promise<void> {
+  const target = `${domain()}/${LABEL}`;
+  await runProcess('launchctl', ['bootout', target]); // fine if it was not loaded
+  const end = Date.now() + 10_000;
+  while (Date.now() < end && (await runProcess('launchctl', ['print', target])).code === 0) await Bun.sleep(200);
+}
+
 export async function installService(): Promise<void> {
   if (isWindows) {
     const schtasks = windowsSystem('schtasks.exe');
@@ -155,8 +171,14 @@ export async function installService(): Promise<void> {
     await mkdir(dirname(file), { recursive: true });
     await mkdir(paths().dir, { recursive: true, mode: 0o700 });
     await writeFile(file, plist());
-    await runProcess('launchctl', ['bootout', `${domain()}/${LABEL}`]); // fine if it was not loaded
-    await must('launchctl', ['bootstrap', domain(), file]);
+    await unloadLaunchd();
+    // Even after unloading, launchd can briefly refuse the same label (error 5).
+    for (let attempt = 1; ; attempt++) {
+      const r = await runProcess('launchctl', ['bootstrap', domain(), file]);
+      if (r.code === 0) break;
+      if (attempt >= 5) throw new Error(`launchctl bootstrap ${domain()} ${file} failed: ${r.stderr.trim() || r.stdout.trim()}`);
+      await Bun.sleep(1000);
+    }
     return;
   }
   if (serviceSupported()) {
@@ -176,7 +198,7 @@ export async function uninstallService(): Promise<void> {
     await runProcess(windowsSystem('schtasks.exe'), ['/End', '/TN', TASK]);
     await runProcess(windowsSystem('schtasks.exe'), ['/Delete', '/TN', TASK, '/F']);
   } else if (process.platform === 'darwin') {
-    await runProcess('launchctl', ['bootout', `${domain()}/${LABEL}`]);
+    await unloadLaunchd();
     await rm(plistPath(), { force: true });
   } else if (serviceSupported()) {
     await runProcess('systemctl', ['--user', 'disable', '--now', UNIT]);
@@ -187,8 +209,9 @@ export async function uninstallService(): Promise<void> {
 
 export async function serviceState(): Promise<ServiceState> {
   if (isWindows) {
-    const r = await runProcess(windowsSystem('schtasks.exe'), ['/Query', '/TN', TASK]);
+    const r = await runProcess(windowsSystem('schtasks.exe'), ['/Query', '/TN', TASK, '/XML']);
     if (r.code !== 0) return 'not-installed';
+    if (isLegacyTaskXml(r.stdout)) return 'legacy';
     // schtasks' status column is localized; ask the relay instead.
     return (await localRelayUp()) ? 'running' : 'stopped';
   }

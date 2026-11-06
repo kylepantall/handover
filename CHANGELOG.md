@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `handover join [RELAY_URL]`: join peers on this network (or a relay) on a machine that already has handover. Asks for the secret, or reads `HANDOVER_TOKEN`; refuses a secret on the command line. `handover link` mentions it.
+- `handover doctor` / `service status` recognise v0.5.0's hidden logon task on Windows (`legacy`) and say to remove it, instead of reporting a broken service.
+- macOS: `service install` waits for launchd to finish unloading the old job and retries, fixing `Bootstrap failed: 5: Input/output error`.
+
 ## 0.6.5
 
 - `scripts/uninstall.sh` and `scripts/uninstall.ps1`: one-command removal on every OS (service/logon task incl. the v0.5.0 hidden one, running relays, Claude Code MCP server and hook, PATH, app, config). `--keep-config` / `-KeepConfig`.

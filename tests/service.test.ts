@@ -33,3 +33,11 @@ test('the Windows logon task passes the data folder and log, is not hidden, and 
   expect(xml).toContain('<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>');
   expect(xml).toContain('<LogonTrigger>');
 });
+
+test('v0.5.0 hidden conhost tasks are recognised as legacy; the current task is not', async () => {
+  const { isLegacyTaskXml } = await import('../src/service.ts');
+  const legacy = '<Settings><Hidden>true</Hidden></Settings><Exec><Command>C:\\Windows\\System32\\conhost.exe</Command><Arguments>--headless "C:\\x\\handover.exe" serve</Arguments></Exec>';
+  expect(isLegacyTaskXml(legacy)).toBe(true);
+  expect(isLegacyTaskXml('<Exec><Command>C:\\Windows\\System32\\conhost.exe</Command></Exec>')).toBe(true);
+  expect(isLegacyTaskXml(taskXml())).toBe(false);
+});

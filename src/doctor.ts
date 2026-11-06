@@ -52,7 +52,7 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     if (state === 'ok') add('relay', 'ok', `${ep.url} reachable, token accepted`);
     else if (state === 'unauthorized') add('relay', 'fail', `${ep.url} rejected the token`, 'handover setup --join <url> --token <token>');
     else if (!config.relay) add('relay', 'fail', `${ep.url} unreachable`, 'Is the relay running?');
-    else if (['running', 'stopped'].includes(await serviceState()))
+    else if (['running', 'stopped'].includes(await serviceState())) // not 'legacy': that task is to be removed
       add('relay', 'fail', `${ep.url} not answering, but the login service is installed`, `handover service restart (log: ${p.log})`);
     // Hosted on demand: not running is the normal idle state, not a failure.
     else add('relay', 'info', 'not running right now; starts with Claude Code’s MCP server, wait or worker', 'handover service install (to keep it running)');
@@ -69,7 +69,9 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
 
   if (config.relay) {
     const svc = await serviceState();
-    if (svc === 'running') add('service', 'ok', 'relay runs at login');
+    if (svc === 'legacy')
+      add('service', 'fail', 'old hidden logon task from v0.5.0 (the pattern antivirus flagged)', "handover service uninstall, or delete 'handover-relay' in Task Scheduler");
+    else if (svc === 'running') add('service', 'ok', 'relay runs at login');
     else if (svc === 'stopped') add('service', 'warn', 'installed but not running', `handover service restart (log: ${p.log})`);
     else if (svc === 'not-installed')
       add('service', 'info', 'not installed: the relay runs inside handover (Claude Code’s MCP server, wait, worker) while one is open', 'handover service install');

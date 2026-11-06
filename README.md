@@ -81,6 +81,7 @@ Keep the config and queue (to reinstall with the same secret): add `-s -- --keep
 | `handover worker --exec "claude -p"` | Auto-pickup: run an agent on each new handover |
 | `handover list` | Show the queue |
 | `handover link` | Print the connect commands for macOS/Linux and Windows |
+| `handover join [RELAY_URL]` | Already installed: join peers on this network (or a relay); asks for the secret |
 | `handover token` | Print the relay token / peer secret |
 | `handover service install\|uninstall\|restart\|status\|log` | Relay at login (launchd / systemd `--user` / Task Scheduler) |
 | `handover doctor` | Check config, relay, peers, service, Claude Code |

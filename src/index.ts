@@ -8,6 +8,7 @@ import { formatLink, linkInfo } from './link.ts';
 import { removeHook, unregisterFromClaude } from './claude.ts';
 import { paths } from './paths.ts';
 import { installService, serviceState, uninstallService } from './service.ts';
+import { runJoin } from './join.ts';
 import { runSetup } from './setup.ts';
 import { TUNNELS, type Tunnel } from './types.ts';
 import { runUpdate } from './update.ts';
@@ -23,6 +24,8 @@ Usage: handover <command>
         --relay [--port N] [--tunnel tailscale|cloudflared]   (scripted: this machine is the relay)
         --join URL --token T                                   (scripted: connect to a relay)
         [--agent NAME] [--claude] [--hook] [--no-service]
+  join [RELAY_URL]              Join peers on this network, or the relay at RELAY_URL; asks for the
+                                secret (or reads HANDOVER_TOKEN) [--agent NAME] [--no-service]
   wait --objective TEXT         Create a handover and block until an agent completes it
         [--context TEXT | --context-file PATH] [--to AGENT] [--priority N]
         [--id ID] [--out DIR] [--timeout SEC] [--json]
@@ -54,6 +57,7 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
   list: { status: s, for: s },
   serve: { port: s, host: s, token: s, tunnel: s, data: s, lease: s, 'max-attempts': s, retention: s, log: s, home: s },
   link: { json: b },
+  join: { agent: s, 'no-service': b },
   doctor: { json: b },
   update: { check: b, force: b, ref: s },
 };
@@ -108,6 +112,9 @@ async function main(argv: string[]): Promise<number | null> {
         hook: o.hook === true,
         service: o['no-service'] ? false : undefined,
       });
+    case 'join':
+      if (positionals.length > 1) throw new Error('Usage: handover join [RELAY_URL]');
+      return runJoin(p, { target: positionals[0], agent: str('agent'), service: o['no-service'] ? false : undefined });
     case 'serve':
       await serve(p, {
         port: num(o.port, 'port'),
