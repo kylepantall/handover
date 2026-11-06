@@ -18,14 +18,24 @@ const plistPath = () => join(homedir(), 'Library', 'LaunchAgents', `${LABEL}.pli
 const unitPath = () => join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', UNIT);
 const domain = () => `gui/${userInfo().uid}`;
 
+/** Env the service needs: PATH (so --tunnel finds tailscale/cloudflared) and a custom HANDOVER_HOME. */
+function serviceEnv(): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    ...(process.env.HANDOVER_HOME ? { HANDOVER_HOME: process.env.HANDOVER_HOME } : {}),
+  };
+}
+
 export function serviceSupported(): boolean {
   return process.platform === 'darwin' || (process.platform === 'linux' && Bun.which('systemctl') != null);
 }
 
-function plist(): string {
+export function plist(): string {
   const args = selfCommand('serve').map((a) => `    <string>${xml(a)}</string>`).join('\n');
   const log = xml(paths().log);
-  // PATH lets `--tunnel` find tailscale / cloudflared.
+  const env = Object.entries(serviceEnv())
+    .map(([k, v]) => `<key>${xml(k)}</key><string>${xml(v)}</string>`)
+    .join('');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -36,7 +46,7 @@ function plist(): string {
 ${args}
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>${xml(process.env.PATH ?? '/usr/bin:/bin')}</string></dict>
+  <dict>${env}</dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${log}</string>
@@ -46,14 +56,16 @@ ${args}
 `;
 }
 
-function unit(): string {
+export function unit(): string {
   const exec = selfCommand('serve').map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
   return `[Unit]
 Description=Handover relay
 
 [Service]
 ExecStart=${exec}
-Environment=PATH=${process.env.PATH ?? '/usr/bin:/bin'}
+${Object.entries(serviceEnv())
+  .map(([k, v]) => `Environment="${k}=${v.replace(/(["\\])/g, '\\$1')}"`)
+  .join('\n')}
 Restart=on-failure
 
 [Install]
