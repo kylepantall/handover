@@ -1,0 +1,20 @@
+{
+  "name": "handover-mcp",
+  "version": "0.1.0",
+  "description": "Hand tasks between LLM agents across machines via MCP",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "bin": {
+    "handover": "bin/handover.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
