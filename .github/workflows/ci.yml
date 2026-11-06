@@ -54,11 +54,11 @@ jobs:
           # A leftover v0.5.0-style task (run through conhost --headless) must be removed, not recreated.
           schtasks /Create /TN handover-relay /SC ONLOGON /TR "conhost.exe --headless cmd /c exit" /F | Out-Null
           & ./scripts/install.ps1 -Peer -Agent ci-win
+          if ($LASTEXITCODE -ne 0) { throw 'install.ps1 failed' }
           cmd /c "schtasks /Query /TN handover-relay >nul 2>&1"
           if ($LASTEXITCODE -eq 0) { throw 'install.ps1 left the legacy hidden task in place' }
           if ($env:HANDOVER_TOKEN) { throw 'install.ps1 left HANDOVER_TOKEN in the session' }
           if ((Get-Content (Join-Path $env:HANDOVER_HOME 'config.json') -Raw | ConvertFrom-Json).token -ne 'ci-shared-secret') { throw 'setup did not take the token from HANDOVER_TOKEN' }
-          if ($LASTEXITCODE -ne 0) { throw 'install.ps1 failed' }
           $exe = Join-Path $env:HANDOVER_INSTALL_DIR 'app\handover.exe'
           & $exe --version
           & $exe link
