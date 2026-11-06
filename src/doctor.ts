@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { claudeRegistration, hookInstalled } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, endpoint, loadConfig } from './config.ts';
+import { PeerBrowser } from './discovery.ts';
 import type { Paths } from './paths.ts';
 import { serviceState } from './service.ts';
 import type { Config } from './types.ts';
@@ -42,14 +43,24 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     }
   }
 
-  const ep = endpoint(config);
+  const ep = config.peer ? { ...endpoint(config), url: `http://127.0.0.1:${config.relay?.port ?? 7777}` } : endpoint(config);
   add('agent', 'info', agentName(config));
+  add('mode', 'info', config.peer ? 'peer-to-peer (mDNS on this network)' : config.relay ? 'relay on this machine' : 'joined relay');
   if (!ep.token) add('relay', 'fail', `no token for ${ep.url}`, 'handover setup');
   else {
     const state = await probe(ep);
     if (state === 'ok') add('relay', 'ok', `${ep.url} reachable, token accepted`);
     else if (state === 'unauthorized') add('relay', 'fail', `${ep.url} rejected the token`, 'handover setup --join <url> --token <token>');
     else add('relay', 'fail', `${ep.url} unreachable`, config.relay ? 'handover service install' : 'Is the relay running?');
+  }
+
+  if (config.peer && ep.token) {
+    const browser = new PeerBrowser(ep.token, { settleMs: 2000 });
+    await browser.ready;
+    const others = [...new Set(browser.peers().map((p) => p.agent).filter((a) => a !== agentName(config)))];
+    browser.stop();
+    if (others.length) add('peers', 'ok', others.join(', '));
+    else add('peers', 'warn', 'no other peers seen', 'Run setup --peer with the same secret on another machine (handover token)');
   }
 
   if (config.relay) {

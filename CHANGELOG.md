@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- Peer-to-peer mode: `handover setup --peer` (or `install.sh --peer --token <secret>`). Every machine runs its own small relay and peers find each other by mDNS (`_handover._tcp`), so there are no addresses to type.
+- Peers only see each other when they share a secret (advertised as a one-way network id).
+- MCP tools, `worker`, `list` and the SessionStart hook work across all peers; new tasks stay on the machine that created them.
+- `doctor` shows the mode and the peers it can see.
+
 ## 0.3.0
 
 - One-line install (`curl … | bash`) with a private Bun and a `handover` launcher in `~/.local/bin`, like keyhop.

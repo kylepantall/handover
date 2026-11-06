@@ -4,8 +4,10 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { httpApi, RelayError } from './client.ts';
-import { agentName, DEFAULT_PORT, endpoint, loadConfig, saveConfig } from './config.ts';
+import { RelayError } from './client.ts';
+import { agentName, DEFAULT_PORT, loadConfig, saveConfig } from './config.ts';
+import { connect } from './connect.ts';
+import { advertise } from './discovery.ts';
 import type { Paths } from './paths.ts';
 import { generateToken, lanAddresses, startServer, startTunnel } from './server.ts';
 import { isTerminal, Store } from './store.ts';
@@ -17,9 +19,7 @@ const log = (msg: string, ctx?: Record<string, unknown>) => console.error('[hand
 
 async function client(p: Paths) {
   const config = await loadConfig(p);
-  const ep = endpoint(config);
-  if (!ep.token) throw new Error('no relay token: run handover setup (or set HANDOVER_TOKEN)');
-  return { api: httpApi(ep), agent: agentName(config), url: ep.url };
+  return { ...connect(config), peer: config.peer === true };
 }
 
 export interface ServeOptions {
@@ -53,9 +53,11 @@ export async function serve(p: Paths, o: ServeOptions): Promise<void> {
     retentionMs: (o.retentionHours ?? relay.retentionHours ?? 24) * 3_600_000,
   });
   const { server } = await startServer({ port, host: o.host ?? relay.host ?? '0.0.0.0', token, store });
-  const shutdown = () => {
+  const unadvertise = config.peer ? advertise({ port, agent: agentName(config), token }) : null;
+  const shutdown = async () => {
     store.flush();
     server.close();
+    await unadvertise?.().catch(() => {});
     process.exit(EXIT.ok);
   };
   process.on('SIGINT', shutdown);
@@ -63,7 +65,7 @@ export async function serve(p: Paths, o: ServeOptions): Promise<void> {
 
   const urls = [`http://127.0.0.1:${port}`, ...lanAddresses().map((ip) => `http://${ip}:${port}`)];
   if (tunnel) urls.unshift((await startTunnel(tunnel, port)).url);
-  console.log('Handover relay running\n');
+  console.log(config.peer ? `Handover peer "${agentName(config)}" running (announced on this network)\n` : 'Handover relay running\n');
   console.log(`  data:   ${data === 'none' ? '(memory only)' : path.resolve(data)}`);
   for (const u of urls) console.log(`  url:    ${u}`);
   console.log(`\n  Token:  handover token   (stored in ${p.config})`);
@@ -95,12 +97,18 @@ export interface WaitOptions {
 }
 
 export async function wait(p: Paths, o: WaitOptions): Promise<number> {
-  const { api, agent } = await client(p);
+  const { api, agent, peer } = await client(p);
   const context = o.contextFile ? await fs.readFile(o.contextFile, 'utf8') : (o.context ?? '');
 
   let id = o.id;
   if (o.objective) {
-    const task = await api.create({ id, objective: o.objective, context, from: agent, to: o.to, priority: o.priority });
+    const task = await api
+      .create({ id, objective: o.objective, context, from: agent, to: o.to, priority: o.priority })
+      .catch((err: Error) => {
+        // Peer mode keeps new tasks on this machine's own relay.
+        if (peer && !(err instanceof RelayError)) throw new Error('this machine’s peer relay is not running: handover service install');
+        throw err;
+      });
     id = task.id;
     log('created', { id, to: task.to, priority: task.priority });
   } else if (!id) {
@@ -187,10 +195,10 @@ export async function worker(p: Paths, o: WorkerOptions): Promise<number> {
     console.error('worker needs --exec "<agent command>"');
     return EXIT.usage;
   }
-  const { api, agent: configured, url } = await client(p);
+  const { api, agent: configured, label } = await client(p);
   const agent = o.agent ?? configured;
   const leaseMs = o.leaseSeconds ? o.leaseSeconds * 1000 : undefined;
-  log('worker polling', { agent, url });
+  log('worker polling', { agent, relay: label });
   for (;;) {
     try {
       let task: Task | null;

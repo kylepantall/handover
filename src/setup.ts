@@ -9,6 +9,7 @@ import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, saveConfig } from './config.ts';
 import { formatChecks, runChecks } from './doctor.ts';
 import type { Paths } from './paths.ts';
+import { PeerBrowser } from './discovery.ts';
 import { generateToken, lanAddresses } from './server.ts';
 import { installService, serviceSupported } from './service.ts';
 import { validateAgent } from './store.ts';
@@ -19,6 +20,8 @@ export interface SetupOptions {
   relay?: boolean;
   /** Join the relay at this URL. */
   join?: string;
+  /** Peer-to-peer on this network: every machine runs its own relay and peers find each other by mDNS. */
+  peer?: boolean;
   token?: string;
   port?: number;
   tunnel?: Tunnel;
@@ -27,7 +30,7 @@ export interface SetupOptions {
   claude?: boolean;
   /** Add the SessionStart hook to Claude Code. */
   hook?: boolean;
-  /** Start the relay at login (relay mode; default yes where supported). */
+  /** Start the relay at login (relay and peer mode; default yes where supported). */
   service?: boolean;
 }
 
@@ -68,7 +71,27 @@ async function waitForRelay(url: string, token: string, ms = 8000): Promise<bool
   return false;
 }
 
+/** Peers already on this network with the same secret (agent names). */
+async function findPeers(token: string, self: string): Promise<string[]> {
+  const browser = new PeerBrowser(token, { settleMs: 2500 });
+  await browser.ready;
+  const names = browser.peers().map((p) => p.agent).filter((a) => a !== self);
+  browser.stop();
+  return [...new Set(names)];
+}
+
+function peerHint(config: Config): string {
+  return [
+    'On each other machine on this network, run:',
+    '',
+    `  curl -fsSL ${INSTALL_URL} | bash -s -- --peer --token ${config.token}`,
+    '',
+    'Peers find each other automatically; no addresses needed.',
+  ].join('\n');
+}
+
 function joinHint(config: Config): string {
+  if (config.peer) return peerHint(config);
   const port = config.relay?.port ?? DEFAULT_PORT;
   const url = lanAddresses().map((ip) => `http://${ip}:${port}`)[0] ?? `http://<this-machine>:${port}`;
   return [
@@ -101,40 +124,51 @@ async function apply(p: Paths, config: Config, opts: SetupOptions, say: (msg: st
 
 export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
   const existing = await loadConfig(p);
-  const scripted = opts.relay || opts.join;
+  const scripted = opts.relay || opts.join || opts.peer;
 
   if (scripted) {
-    if (opts.relay && opts.join) throw new Error('use --relay or --join, not both');
+    if ([opts.relay, opts.join, opts.peer].filter(Boolean).length > 1) throw new Error('use one of --relay, --join or --peer');
     const config: Config = { ...existing, agent: opts.agent ?? agentName(existing) };
     validateAgent(config.agent, 'agent name');
-    if (opts.relay) {
+    if (opts.relay || opts.peer) {
       const port = opts.port ?? existing.relay?.port ?? DEFAULT_PORT;
       config.relay = { ...existing.relay, port, ...(opts.tunnel ? { tunnel: opts.tunnel } : {}) };
       config.url = `http://127.0.0.1:${port}`;
-      config.token = opts.token ?? existing.token ?? generateToken();
+      // A relay token from a joined machine belongs to that relay, not to a new peer network.
+      const reusable = opts.peer ? existing.peer && existing.token : existing.relay && existing.token;
+      config.token = opts.token ?? (reusable || generateToken());
+      if (opts.peer) config.peer = true;
+      else delete config.peer;
     } else {
       if (validUrl(opts.join)) throw new Error(`invalid --join URL: ${opts.join}`);
       if (!opts.token) throw new Error('--join needs --token');
       config.url = opts.join!.replace(/\/+$/, '');
       config.token = opts.token;
       delete config.relay;
+      delete config.peer;
       const state = await probe({ url: config.url, token: config.token });
       if (state !== 'ok') console.warn(`warning: relay ${config.url} is ${state}; saved anyway`);
     }
-    await apply(p, config, { ...opts, service: opts.relay ? (opts.service ?? serviceSupported()) : false }, (m) => console.log(m));
-    if (opts.relay) console.log(`\n${joinHint(config)}`);
+    const runsRelay = Boolean(opts.relay || opts.peer);
+    await apply(p, config, { ...opts, service: runsRelay ? (opts.service ?? serviceSupported()) : false }, (m) => console.log(m));
+    if (opts.peer) {
+      const found = await findPeers(config.token!, config.agent!);
+      console.log(found.length ? `Peers on this network: ${found.join(', ')}` : 'No other peers seen yet.');
+    }
+    if (runsRelay) console.log(`\n${joinHint(config)}`);
     return 0;
   }
 
-  if (!process.stdin.isTTY) throw new Error('setup needs a terminal, or flags: --relay | --join <url> --token <token>');
+  if (!process.stdin.isTTY) throw new Error('setup needs a terminal, or flags: --peer | --relay | --join <url> --token <token>');
 
   ui.intro('handover setup');
   const role = bail(
     await ui.select({
-      message: 'What should this machine do?',
-      initialValue: existing.relay || !existing.url ? 'relay' : 'join',
+      message: 'How should this machine connect?',
+      initialValue: existing.peer || (!existing.url && !existing.relay) ? 'peer' : existing.relay ? 'relay' : 'join',
       options: [
-        { value: 'relay', label: 'Run the relay here', hint: 'other machines connect to this one' },
+        { value: 'peer', label: 'Peer-to-peer on this network', hint: 'fastest: no addresses, just a shared secret' },
+        { value: 'relay', label: 'Run a relay here', hint: 'one hub; works across networks with a tunnel' },
         { value: 'join', label: 'Connect to a relay on another machine' },
       ],
     })
@@ -142,7 +176,33 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
 
   const config: Config = { ...existing };
   const choices: SetupOptions = {};
-  if (role === 'relay') {
+  if (role === 'peer') {
+    const first = bail(
+      await ui.select({
+        message: 'Shared secret',
+        initialValue: existing.peer && existing.token ? 'keep' : 'new',
+        options: [
+          ...(existing.peer && existing.token ? [{ value: 'keep', label: 'Keep the current secret' }] : []),
+          { value: 'new', label: 'This is the first machine: create a secret' },
+          { value: 'enter', label: 'Join other peers: enter their secret', hint: 'handover token on a peer prints it' },
+        ],
+      })
+    );
+    if (first === 'new') config.token = generateToken();
+    else if (first === 'enter') config.token = bail(await ui.password({ message: 'Secret', validate: (v) => (v ? undefined : 'Required') }));
+    config.peer = true;
+    config.relay = { ...existing.relay, port: existing.relay?.port ?? DEFAULT_PORT };
+    config.url = `http://127.0.0.1:${config.relay.port}`;
+    if (first === 'enter') {
+      const s = ui.spinner();
+      s.start('Looking for peers with this secret');
+      const found = await findPeers(config.token!, agentName(existing));
+      s.stop(found.length ? `Found: ${found.join(', ')}` : 'No peers seen yet (they may be off); continuing');
+    }
+    choices.service = serviceSupported()
+      ? bail(await ui.confirm({ message: 'Start this machine’s peer relay now and at every login? (needed to send handovers)', initialValue: true }))
+      : false;
+  } else if (role === 'relay') {
     const port = Number(
       bail(
         await ui.text({
@@ -171,7 +231,8 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
     if (tunnel === 'none') delete config.relay.tunnel;
     else config.relay.tunnel = tunnel;
     config.url = `http://127.0.0.1:${port}`;
-    config.token = existing.token ?? generateToken();
+    config.token = (existing.relay && !existing.peer && existing.token) || generateToken();
+    delete config.peer;
     if (serviceSupported())
       choices.service = bail(await ui.confirm({ message: 'Start the relay now and at every login?', initialValue: true }));
   } else {
@@ -180,6 +241,7 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
     ).replace(/\/+$/, '');
     config.token = bail(await ui.password({ message: 'Relay token (printed by setup on the relay machine)', validate: (v) => (v ? undefined : 'Required') }));
     delete config.relay;
+    delete config.peer;
     const s = ui.spinner();
     s.start('Checking the relay');
     const state = await probe({ url: config.url, token: config.token });
@@ -203,7 +265,7 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
   }
 
   await apply(p, config, choices, (m) => ui.log.success(m));
-  if (role === 'relay') ui.note(joinHint(config), 'Connect other machines');
+  if (role !== 'join') ui.note(joinHint(config), 'Connect other machines');
   ui.note(formatChecks(await runChecks(p, { offline: true })), 'handover doctor');
   ui.outro('Done. Hand something over: handover wait --objective "…"');
   return 0;

@@ -36,6 +36,8 @@ export interface Task {
   files: TaskFile[];
   createdAt: string;
   updatedAt: string;
+  /** Peer mode: agent name of the peer holding this task (set by the client, not stored). */
+  peer?: string;
 }
 
 export type TaskSummary = Omit<Task, 'context' | 'output' | 'files' | 'seq'> & { fileCount: number };
@@ -100,6 +102,14 @@ export interface Config {
   token?: string;
   /** This machine's agent name, used for targeting and leases. */
   agent?: string;
-  /** Set when this machine runs the relay. */
+  /** Set when this machine runs the relay (also in peer mode, where every machine runs one). */
   relay?: RelayConfig;
+  /** Peer-to-peer on the local network: find other machines by mDNS instead of one relay URL. */
+  peer?: boolean;
+}
+
+/** A machine found on the network in peer mode. */
+export interface Peer {
+  agent: string;
+  url: string;
 }

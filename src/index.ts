@@ -14,8 +14,9 @@ const HELP = `handover ${VERSION} — hand tasks between AI agents on different 
 
 Usage: handover <command>
 
-  setup                         Guided setup: run the relay here or join one, name this agent,
-                                add the MCP server and SessionStart hook to Claude Code
+  setup                         Guided setup: peer-to-peer, run a relay here, or join one; name this
+                                agent; add the MCP server and SessionStart hook to Claude Code
+        --peer [--token SECRET]                                (scripted: peer-to-peer on this network)
         --relay [--port N] [--tunnel tailscale|cloudflared]   (scripted: this machine is the relay)
         --join URL --token T                                   (scripted: connect to a relay)
         [--agent NAME] [--claude] [--hook] [--no-service]
@@ -42,7 +43,7 @@ Env overrides: HANDOVER_URL, HANDOVER_TOKEN, HANDOVER_AGENT.`;
 const s = { type: 'string' } as const;
 const b = { type: 'boolean' } as const;
 const OPTIONS: Record<string, ParseArgsConfig['options']> = {
-  setup: { relay: b, join: s, token: s, port: s, tunnel: s, agent: s, claude: b, hook: b, 'no-service': b },
+  setup: { peer: b, relay: b, join: s, token: s, port: s, tunnel: s, agent: s, claude: b, hook: b, 'no-service': b },
   wait: { objective: s, context: s, 'context-file': s, id: s, to: s, priority: s, out: s, timeout: s, json: b },
   worker: { exec: s, agent: s, lease: s, interval: s, once: b },
   list: { status: s, for: s },
@@ -89,6 +90,7 @@ async function main(argv: string[]): Promise<number | null> {
       return EXIT.ok;
     case 'setup':
       return runSetup(p, {
+        peer: o.peer === true,
         relay: o.relay === true,
         join: str('join'),
         token: str('token'),

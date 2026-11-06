@@ -31,6 +31,7 @@ Usage: bash install.sh [options] [REF]
 Installs $HANDOVER_REPO (branch, tag or commit; default main) under
 ~/.local/share/handover with a launcher in ~/.local/bin, then runs setup.
 
+  --peer [--token T]      Peer-to-peer on this network (no questions; omit --token on the first machine)
   --relay                 Make this machine the relay (no questions)
   --join URL --token T    Connect this machine to a relay (no questions)
   --agent NAME            Agent name for this machine (default: hostname)
@@ -48,7 +49,7 @@ main() {
     case "$1" in
       --help | -h) usage; return ;;
       --no-setup) run_setup=false ;;
-      --relay) setup_args+=(--relay) ;;
+      --relay | --peer) setup_args+=("$1") ;;
       --claude) setup_args+=(--claude --hook) ;;
       --join | --token | --agent)
         [[ $# -ge 2 ]] || { printf '%s needs a value.\n' "$1" >&2; return 1; }

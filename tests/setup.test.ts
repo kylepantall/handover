@@ -74,6 +74,31 @@ test('scripted join checks the relay and stores url, token and agent', async () 
   }
 });
 
+test('scripted peer setup: new secret, kept on rerun, never reuses a joined relay token', async () => {
+  const p = paths(dir);
+  await fs.writeFile(p.config, JSON.stringify({ url: 'http://10.0.0.5:7777', token: 'relay-token' }));
+  const quiet = async (fn: () => Promise<unknown>) => {
+    const log = console.log;
+    console.log = () => {};
+    try {
+      await fn();
+    } finally {
+      console.log = log;
+    }
+  };
+  await quiet(() => runSetup(p, { peer: true, agent: 'desk', service: false }));
+  const first = await loadConfig(p);
+  expect(first.peer).toBe(true);
+  expect(first.token).not.toBe('relay-token');
+  expect(first.url).toBe('http://127.0.0.1:7777');
+
+  await quiet(() => runSetup(p, { peer: true, service: false }));
+  expect((await loadConfig(p)).token).toBe(first.token!);
+
+  await quiet(() => runSetup(p, { peer: true, token: 'shared', service: false }));
+  expect((await loadConfig(p)).token).toBe('shared');
+}, 20_000); // each peer setup scans the network for a few seconds
+
 test('join rejects a bad URL and a missing token', async () => {
   expect((await cli(['setup', '--join', 'not a url', '--token', 'x'])).code).toBe(1);
   expect((await cli(['setup', '--join', 'http://127.0.0.1:1'])).code).toBe(1);
