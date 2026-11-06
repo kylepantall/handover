@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2
+
+- `handover doctor`: a relay that isn't running right now is reported as information, not a failure. It starts on demand with Claude Code's MCP server, `wait` or `worker`; only an installed login service that isn't answering is a failure.
+
 ## 0.6.1
 
 - Fix: the queue is written to disk on every change. On Windows a killed process gets no shutdown hook, so the newest task could be lost when the process hosting the relay was terminated.
