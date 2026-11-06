@@ -65,11 +65,23 @@ jobs:
           $env:HANDOVER_HOME = Join-Path $env:RUNNER_TEMP 'hh'
           # The installer's setup started the relay through Task Scheduler.
           if ((& $exe service status) -ne 'running') { & $exe service log; throw 'relay task is not running' }
-          $wait = Start-Job { param($exe, $home_) $env:HANDOVER_HOME = $home_; & $exe wait --objective 'windows ci' --json --timeout 60 } -ArgumentList $exe, $env:HANDOVER_HOME
+          # handover logs to stderr; inside a job PowerShell turns that into error records,
+          # so send it to a file and keep only the JSON on stdout.
+          $err = Join-Path $env:RUNNER_TEMP 'wait.err'
+          $wait = Start-Job {
+            param($exe, $home_, $err)
+            $env:HANDOVER_HOME = $home_
+            & $exe wait --objective 'windows ci' --json --timeout 60 2>$err
+            "EXIT=$LASTEXITCODE"
+          } -ArgumentList $exe, $env:HANDOVER_HOME, $err
           Start-Sleep -Seconds 3
           & $exe worker --once --exec 'findstr /c:"windows ci"'
-          $result = Receive-Job $wait -Wait | Out-String
-          Write-Host $result
-          if (($result | ConvertFrom-Json).status -ne 'success') { throw 'handover did not complete' }
+          $lines = @(Receive-Job $wait -Wait)
+          Get-Content $err -ErrorAction SilentlyContinue | Write-Host
+          $exit = ($lines | Where-Object { $_ -like 'EXIT=*' }) -replace 'EXIT=', ''
+          $json = ($lines | Where-Object { $_ -notlike 'EXIT=*' }) -join "`n"
+          Write-Host $json
+          if ($exit -ne '0') { throw "wait exited $exit" }
+          if (($json | ConvertFrom-Json).status -ne 'success') { throw 'handover did not complete' }
           & $exe service uninstall
           if ((& $exe service status) -ne 'not-installed') { throw 'service uninstall failed' }
