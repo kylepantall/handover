@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.6
 
 - `handover join [RELAY_URL]`: join peers on this network (or a relay) on a machine that already has handover. Asks for the secret, or reads `HANDOVER_TOKEN`; refuses a secret on the command line. `handover link` mentions it.
 - `handover doctor` / `service status` recognise v0.5.0's hidden logon task on Windows (`legacy`) and say to remove it, instead of reporting a broken service.
