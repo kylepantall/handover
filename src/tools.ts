@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { isTerminal } from './store.ts';
 import type { Api, Task, TaskSummary } from './types.ts';
 import { VERSION } from './version.ts';
 
@@ -106,6 +107,28 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client' }: { agentNa
   );
 
   server.registerTool(
+    'handover_wait',
+    {
+      title: 'Wait for a handover to finish',
+      description:
+        'Wait for a handover you created to finish and return its result (output and files). Returns its current status after timeoutSeconds if it is still running: call again to keep waiting.',
+      inputSchema: {
+        id: z.string(),
+        // Codex gives an MCP tool call 60 s by default.
+        timeoutSeconds: z.number().int().positive().max(600).optional().describe('How long to wait (default 50)'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    safe(async ({ id, timeoutSeconds = 50 }, extra) => {
+      const end = Date.now() + timeoutSeconds * 1000;
+      let task = await api.get(id);
+      while (!isTerminal(task.status) && Date.now() < end && !extra?.signal?.aborted) task = await api.wait(id, Math.min(25_000, end - Date.now()));
+      if (isTerminal(task.status)) return text(task);
+      return text({ id: task.id, status: task.status, claimedBy: task.claimedBy, note: 'Not finished yet: call handover_wait again.' });
+    })
+  );
+
+  server.registerTool(
     'handover_claim',
     {
       title: 'Claim a handover',
@@ -169,18 +192,28 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client' }: { agentNa
     'handover_create',
     {
       title: 'Create a handover',
-      description: 'Delegate a task to another agent. Returns an id; a client can run `handover wait --id <id>` or you can poll handover_get.',
+      description:
+        'Delegate a task to another agent (another machine, or Codex / Claude Code on this one). Returns an id and how to be woken when it finishes.',
       inputSchema: {
         objective: z.string(),
         context: z.string().optional(),
         id: z.string().optional(),
-        to: z.string().optional().describe('Only this agent name may claim it'),
+        to: z
+          .string()
+          .optional()
+          .describe('Who may take it: a machine ("pc"), an agent anywhere ("codex", "claude"), or one agent on one machine ("codex@pc"). Default: anyone'),
         priority: z.number().int().min(-1000).max(1000).optional().describe('Higher is picked up first (default 0)'),
       },
     },
     safe(async ({ objective, context, id, to, priority }) => {
       const t = await api.create({ objective, context, id, to, priority, from: agentName });
-      return text({ id: t.id, status: t.status, to: t.to, priority: t.priority });
+      return text({
+        id: t.id,
+        status: t.status,
+        to: t.to,
+        priority: t.priority,
+        whenDone: `To be woken when it finishes, run \`handover wait --id ${t.id} --out handover-${t.id}\` as a background command (Claude Code: Bash with run_in_background): it exits with the output and saves the files. Without background commands, call handover_wait.`,
+      });
     })
   );
 

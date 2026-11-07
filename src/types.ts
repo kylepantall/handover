@@ -152,7 +152,8 @@ export const AGENT_KINDS = ['claude', 'codex'] as const;
 export type AgentKind = (typeof AGENT_KINDS)[number];
 
 export interface AutoPickup {
-  with: AgentKind;
+  /** The agents that take handovers here, each with its own worker; one name in 0.9 configs. */
+  with: AgentKind | AgentKind[];
   /** Skip the agent's permission prompts and sandbox (opt-in only: tasks come from other machines). */
   fullAccess?: boolean;
 }

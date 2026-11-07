@@ -36,7 +36,7 @@ Installs $HANDOVER_REPO (branch, tag or commit; default main) under
                           the whole command), otherwise asked for. Finds the host on this
                           network; URL only if it's elsewhere
   --agent NAME            Agent name for this machine (default: hostname)
-  --auto claude|codex|off Take handovers automatically with that agent (asked in a terminal)
+  --auto AGENT            Take handovers automatically: claude, codex, both or off (asked in a terminal)
   --full-access           Auto-pickup skips the agent's permission prompts and sandbox (risky)
   --no-claude             Don't add handover to Claude Code (added by default when installed)
   --no-codex              Don't add handover to Codex (added by default when installed)

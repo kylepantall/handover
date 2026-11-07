@@ -12,9 +12,10 @@ import { ensureLocalRelay, hostRelay, keepLocalRelay, stopHosting } from './host
 import { startResponder } from './responder.ts';
 import type { Paths } from './paths.ts';
 import { generateToken, lanAddresses, startTunnel } from './server.ts';
-import { isTerminal } from './store.ts';
+import { agentAddress, isTerminal } from './store.ts';
 import { buildMcpServer } from './tools.ts';
-import { acquireWorkerLock, autoWork, WORKER_ENV, workLoop, type WorkOptions } from './worker.ts';
+import { acquireWorkerLock, agentWork, WORKER_ENV, workLoop, type WorkOptions } from './worker.ts';
+import { autoKinds } from './agents.ts';
 import { STATUS, TUNNELS, type AgentKind, type Config, type Task, type TaskStatus, type Tunnel } from './types.ts';
 
 export const EXIT = { ok: 0, failed: 1, cancelled: 2, timeout: 3, usage: 64, interrupted: 130 } as const;
@@ -208,7 +209,7 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
 
 export interface WorkerOptions {
   exec?: string;
-  /** Run this coding agent's CLI (default: the auto-pickup agent from setup). */
+  /** Run this coding agent's CLI (default: the auto-pickup agents from setup). */
   with?: AgentKind;
   fullAccess?: boolean;
   agent?: string;
@@ -219,71 +220,80 @@ export interface WorkerOptions {
 
 export async function worker(p: Paths, o: WorkerOptions): Promise<number> {
   const config = await loadConfig(p);
-  const kind = o.with ?? (o.exec ? undefined : config.auto?.with);
-  if (!o.exec && !kind) {
+  const kinds = o.with ? [o.with] : o.exec ? [] : autoKinds(config.auto);
+  if (!o.exec && !kinds.length) {
     console.error('worker needs --with claude|codex or --exec "<agent command>"');
     return EXIT.usage;
   }
   keepLocalRelay(p, config);
-  const { api, agent: configured, label } = await client(p);
-  const agent = o.agent ?? configured;
-  let work: WorkOptions | null;
-  if (o.exec) work = { agent, command: o.exec };
-  else {
-    work = autoWork(p, { with: kind!, fullAccess: o.fullAccess ?? (o.with ? false : config.auto?.fullAccess) }, agent, 'worker');
+  const { api, agent: machine, label } = await client(p);
+  const timing = { leaseMs: o.leaseSeconds ? o.leaseSeconds * 1000 : undefined, intervalMs: (o.intervalSeconds ?? 3) * 1000, once: o.once };
+  if (o.exec) {
+    log('worker polling', { agent: o.agent ?? machine, relay: label, with: 'exec' });
+    await workLoop(api, { agent: o.agent ?? machine, command: o.exec, ...timing });
+    return EXIT.ok;
+  }
+  const fullAccess = o.fullAccess ?? (o.with ? false : config.auto?.fullAccess === true);
+  const works: WorkOptions[] = [];
+  for (const kind of kinds) {
+    const work = agentWork(p, kind, fullAccess, o.agent ?? machine, 'worker');
     if (!work) {
       console.error(`worker: the ${kind} CLI isn't installed`);
       return EXIT.failed;
     }
+    // Hold this agent's worker lock if it's free, so the MCP server of an agent
+    // this worker starts doesn't start a second worker.
+    acquireWorkerLock(p, kind);
+    log('worker polling', { agent: work.agent, relay: label, with: kind });
+    works.push(work);
   }
-  // Hold the machine's worker lock if it's free, so the MCP server of an agent
-  // this worker starts doesn't start a second worker.
-  acquireWorkerLock(p);
-  log('worker polling', { agent, relay: label, with: kind ?? 'exec' });
-  await workLoop(api, { ...work, leaseMs: o.leaseSeconds ? o.leaseSeconds * 1000 : undefined, intervalMs: (o.intervalSeconds ?? 3) * 1000, once: o.once });
+  await Promise.all(works.map((w) => workLoop(api, { ...w, ...timing })));
   return EXIT.ok;
 }
 
 /**
  * Auto-pickup inside a long-running process (the login service or the MCP
- * server), in the background. Only one process per machine works at a time
- * (acquireWorkerLock); the others check every 30 s and take over when it goes.
- * Waits, rather than failing, while the agent's CLI is missing. Returns false
- * when auto-pickup is off, or inside an agent the worker started.
+ * server), in the background: one worker per configured agent. Only one
+ * process per machine runs each agent's worker (acquireWorkerLock); the others
+ * check every 30 s and take over when it goes. Waits, rather than failing,
+ * while an agent's CLI is missing. Returns false when auto-pickup is off, or
+ * inside an agent the worker started.
  */
 export function startAuto(p: Paths, config: Config, via: string): boolean {
   const auto = config.auto;
   if (!auto || process.env[WORKER_ENV]) return false;
-  void (async () => {
-    let reported = '';
-    const report = (state: string, ctx: Record<string, unknown>) => {
-      if (state !== reported) log(state, ctx);
-      reported = state;
-    };
-    for (;;) {
-      try {
-        const { api, agent } = await connect(p, config);
-        const work = autoWork(p, auto, agent, via);
-        if (!work) report('auto-pickup waiting: agent CLI not installed', { with: auto.with });
-        else if (acquireWorkerLock(p)) {
-          log('auto-pickup on', { agent, with: auto.with, fullAccess: auto.fullAccess === true, via });
-          await workLoop(api, work);
-          return;
-        } else report('auto-pickup: another handover process is the worker', { via });
-      } catch (err) {
-        report('auto-pickup failed to start', { error: (err as Error).message });
-      }
-      await Bun.sleep(30_000);
-    }
-  })();
+  for (const kind of autoKinds(auto)) void autoAgent(p, config, kind, auto.fullAccess === true, via);
   return true;
+}
+
+async function autoAgent(p: Paths, config: Config, kind: AgentKind, fullAccess: boolean, via: string): Promise<void> {
+  let reported = '';
+  const report = (state: string, ctx: Record<string, unknown>) => {
+    if (state !== reported) log(state, ctx);
+    reported = state;
+  };
+  for (;;) {
+    try {
+      const { api, agent: machine } = await connect(p, config);
+      const work = agentWork(p, kind, fullAccess, machine, via);
+      if (!work) report('auto-pickup waiting: agent CLI not installed', { with: kind });
+      else if (acquireWorkerLock(p, kind)) {
+        log('auto-pickup on', { agent: work.agent, fullAccess, via });
+        await workLoop(api, work);
+        return;
+      } else report('auto-pickup: another handover process is the worker', { with: kind, via });
+    } catch (err) {
+      report('auto-pickup failed to start', { with: kind, error: (err as Error).message });
+    }
+    await Bun.sleep(30_000);
+  }
 }
 
 /** Claude Code SessionStart hook. Never fails the session. */
 export async function hook(p: Paths): Promise<number> {
   try {
-    const { api, agent } = await client(p);
-    const pending = await api.list({ status: STATUS.PENDING, agent });
+    const { api, agent: machine } = await client(p);
+    const pending = await api.list({ status: STATUS.PENDING, agent: agentAddress('claude', machine) });
     if (!pending.length) return EXIT.ok;
     const lines = pending.map((t) => `- ${t.id} (priority ${t.priority}): ${t.objective}`).join('\n');
     const additionalContext = `Pending handovers are waiting on the Handover relay:\n${lines}\n\nIf the user wants one picked up, call handover_next (or handover_claim with an id), do the work, then call handover_complete.`;
@@ -300,19 +310,20 @@ export async function list(p: Paths, o: { status?: string; for?: string }): Prom
   return EXIT.ok;
 }
 
-export async function mcp(p: Paths): Promise<void> {
+/** `as`: which agent started this server (registered as `handover mcp --as codex`); it claims as kind@machine. */
+export async function mcp(p: Paths, { as }: { as?: AgentKind } = {}): Promise<void> {
   const config = await loadConfig(p);
-  const { api, agent } = await client(p);
-  // Claude Code keeps this process alive while it's open, which makes it a natural
-  // host for this machine's relay: no login service needed.
+  const { api, agent: machine } = await client(p);
+  // Claude Code and Codex keep this process alive while they're open, which makes
+  // it a natural host for this machine's relay: no login service needed.
   keepLocalRelay(p, config);
-  startResponder(api, { agent, via: 'mcp' });
+  startResponder(api, { agent: machine, via: 'mcp' });
   // Auto-pickup while an agent is open (unless another process already does it).
   startAuto(p, config, 'mcp');
-  // A hosted relay would keep the process alive after Claude Code closes our stdin.
+  // A hosted relay would keep the process alive after the agent closes our stdin.
   process.stdin.once('end', async () => {
     await stopHosting();
     process.exit(EXIT.ok);
   });
-  await buildMcpServer(api, { agentName: agent }).connect(new StdioServerTransport());
+  await buildMcpServer(api, { agentName: as ? agentAddress(as, machine) : machine }).connect(new StdioServerTransport());
 }

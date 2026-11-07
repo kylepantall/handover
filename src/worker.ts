@@ -11,9 +11,9 @@ import path from 'node:path';
 import { ADAPTERS } from './agents.ts';
 import { isWindows, type Paths } from './paths.ts';
 import { startResponder } from './responder.ts';
-import { isTerminal } from './store.ts';
 import { briefing } from './tools.ts';
-import { STATUS, type Api, type AutoPickup, type Task } from './types.ts';
+import { agentAddress, isTerminal } from './store.ts';
+import { STATUS, type AgentKind, type Api, type Task } from './types.ts';
 
 const log = (msg: string, ctx?: Record<string, unknown>) => console.error('[handover]', msg, ...(ctx ? [ctx] : []));
 
@@ -104,11 +104,14 @@ async function runOne(api: Api, t: Task, o: WorkOptions): Promise<void> {
   log('finished', { id: t.id, exitCode: code });
 }
 
-/** The worker auto-pickup runs: the configured agent, each task in its own folder. Null if its CLI is missing. */
-export function autoWork(p: Paths, auto: AutoPickup, agent: string, via: string): WorkOptions | null {
-  const adapter = ADAPTERS[auto.with];
+/**
+ * A worker for one agent: it claims tasks as `kind@machine` (so `to: "codex"`
+ * reaches it), each task in its own folder. Null if the agent's CLI is missing.
+ */
+export function agentWork(p: Paths, kind: AgentKind, fullAccess: boolean, machine: string, via: string): WorkOptions | null {
+  const adapter = ADAPTERS[kind];
   if (!adapter?.bin()) return null;
-  return { agent, command: adapter.execArgv(auto.fullAccess === true), workDir: path.join(p.dir, 'work'), via };
+  return { agent: agentAddress(kind, machine), command: adapter.execArgv(fullAccess), workDir: path.join(p.dir, 'work'), via };
 }
 
 const alive = (pid: number) => {
@@ -121,13 +124,13 @@ const alive = (pid: number) => {
 };
 
 /**
- * One auto-pickup worker per machine, whichever process gets there first (the
+ * One worker per agent per machine, whichever process gets there first (the
  * login service, or one of several open agents' MCP servers). It also stops a
  * worker's own agent from starting another: Codex doesn't pass our environment
  * to the MCP servers it starts. The lock is a file holding the owner's pid.
  */
-export function acquireWorkerLock(p: Paths): boolean {
-  const file = path.join(p.dir, 'worker.lock');
+export function acquireWorkerLock(p: Paths, kind: AgentKind): boolean {
+  const file = path.join(p.dir, `worker-${kind}.lock`);
   mkdirSync(p.dir, { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
