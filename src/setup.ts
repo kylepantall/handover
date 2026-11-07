@@ -10,7 +10,7 @@
 
 import * as ui from '@clack/prompts';
 import { existsSync } from 'node:fs';
-import { ADAPTERS, autoKinds, describeAuto, installedAgents, parseAgentKinds } from './agents.ts';
+import { ADAPTERS, agentSettings, autoKinds, describeAuto, installedAgents, parseAgentKind, parseAgentKinds, withAgentSettings } from './agents.ts';
 import { installHook } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
@@ -22,8 +22,8 @@ import { formatLink, linkInfo } from './link.ts';
 import type { Paths } from './paths.ts';
 import { generateToken } from './server.ts';
 import { installService, serviceByDefault, serviceIsOurs, serviceState, serviceSupported, uninstallService } from './service.ts';
-import { validateAgent } from './store.ts';
-import { TUNNELS, type AgentKind, type AutoPickup, type Config, type Tunnel } from './types.ts';
+import { agentAddress, validateAgent } from './store.ts';
+import { AGENT_KINDS, TUNNELS, type AgentKind, type AgentSettings, type Config, type Tunnel } from './types.ts';
 
 type Say = (message: string) => void;
 
@@ -96,34 +96,37 @@ async function wireAgents(o: AgentOptions, say: Say): Promise<void> {
   }
 }
 
-/** The auto-pickup setting after setup: from the flags, a prompt, or the current config. */
-async function chooseAuto(existing: Config, o: AgentOptions, ask: boolean): Promise<AutoPickup | undefined> {
-  const current = autoKinds(existing.auto);
-  const pick = (kinds: AgentKind[]): AutoPickup => {
-    // Full access carries over only for the same agents.
-    const kept = existing.auto?.fullAccess && kinds.every((k) => current.includes(k));
-    return { with: kinds, ...((o.fullAccess ?? kept) ? { fullAccess: true } : {}) };
+/** Per-agent settings after setup: auto-pickup from the flags, a prompt, or the current config. */
+async function chooseSettings(existing: Config, o: AgentOptions, ask: boolean): Promise<AgentSettings> {
+  const settings: AgentSettings = structuredClone(agentSettings(existing));
+  const current = autoKinds(existing);
+  const setAuto = (kinds: AgentKind[]) => {
+    for (const k of AGENT_KINDS) settings[k] = { ...settings[k], auto: kinds.includes(k) };
   };
-  if (o.auto === 'off') return undefined;
-  if (o.auto) {
+  if (o.auto === 'off') setAuto([]);
+  else if (o.auto) {
     for (const kind of o.auto) {
       if (skipped(o, kind)) throw new Error(`--auto ${kind} needs handover added to ${kind}: drop --no-${kind}`);
       if (!ADAPTERS[kind].bin()) throw new Error(`--auto ${kind}: the ${kind} CLI isn't installed here`);
     }
-    return pick(o.auto);
+    setAuto(o.auto);
+  } else {
+    const agents = installedAgents().filter((a) => !skipped(o, a.kind));
+    if (ask && agents.length) {
+      const hint = 'runs each task unattended, with your usual permission settings';
+      const options = agents.map((a) => ({ value: a.kind as string, label: `Yes, with ${a.label}`, hint }));
+      if (agents.length > 1)
+        options.push({ value: agents.map((a) => a.kind).join(','), label: 'Yes, with both', hint: 'each takes tasks addressed to it, and either takes the rest' });
+      options.push({ value: 'off', label: 'No', hint: 'tasks wait until you ask an agent to pick them up' });
+      const choice = cancelled(
+        await ui.select<string>({ message: 'Take handovers automatically on this machine?', initialValue: current.length ? current.join(',') : agents[0]!.kind, options })
+      );
+      setAuto(choice === 'off' ? [] : parseAgentKinds(choice, 'auto-pickup'));
+    }
   }
-  const agents = installedAgents().filter((a) => !skipped(o, a.kind));
-  if (ask && agents.length) {
-    const hint = 'runs each task unattended, with your usual permission settings';
-    const options = agents.map((a) => ({ value: a.kind as string, label: `Yes, with ${a.label}`, hint }));
-    if (agents.length > 1) options.push({ value: agents.map((a) => a.kind).join(','), label: 'Yes, with both', hint: 'each takes tasks addressed to it, and either takes the rest' });
-    options.push({ value: 'off', label: 'No', hint: 'tasks wait until you ask an agent to pick them up' });
-    const choice = cancelled(
-      await ui.select<string>({ message: 'Take handovers automatically on this machine?', initialValue: current.length ? current.join(',') : agents[0]!.kind, options })
-    );
-    return choice === 'off' ? undefined : pick(parseAgentKinds(choice, 'auto-pickup'));
-  }
-  return current.length ? pick(current) : undefined;
+  // --full-access (installers, handover auto): the agents taking handovers automatically.
+  if (o.fullAccess) for (const k of AGENT_KINDS) if (settings[k]?.auto) settings[k] = { ...settings[k], fullAccess: true };
+  return settings;
 }
 
 /**
@@ -132,13 +135,14 @@ async function chooseAuto(existing: Config, o: AgentOptions, ask: boolean): Prom
  * Returns whether auto-pickup runs at login.
  */
 async function clientService(existing: Config, config: Config, o: AgentOptions, say: Say): Promise<boolean> {
+  const auto = autoKinds(config).length > 0;
   const ours = await serviceIsOurs();
   if (['running', 'stopped'].includes(await serviceState()) && !ours) {
-    if (config.auto) say('A login service from another handover install exists; left alone');
+    if (auto) say('A login service from another handover install exists; left alone');
     return false;
   }
   const kept = roleOf(existing) === 'client' && ours;
-  if (config.auto && serviceSupported() && (o.service ?? (serviceByDefault() || kept))) {
+  if (auto && serviceSupported() && (o.service ?? (serviceByDefault() || kept))) {
     try {
       await installService();
       return true;
@@ -154,31 +158,85 @@ async function clientService(existing: Config, config: Config, o: AgentOptions, 
   return false;
 }
 
-/** `handover auto [claude|codex|off]`: shows or changes auto-pickup. */
-export async function runAuto(p: Paths, o: AgentOptions): Promise<number> {
-  const existing = await loadConfig(p);
+const runsAtLogin = async () => (await serviceState()) === 'running' && (await serviceIsOurs());
+
+/** Saves new agent settings and makes the background worker follow them. */
+async function applySettings(p: Paths, existing: Config, settings: AgentSettings, o: AgentOptions, say: Say): Promise<number> {
   const role = roleOf(existing);
   if (!role) throw new Error('not set up yet: handover host or handover join');
-  const say: Say = (m) => console.log(m);
-  if (o.auto === undefined && o.fullAccess === undefined) {
-    const state = await serviceState();
-    say(describeAuto(existing.auto, state === 'running' && (await serviceIsOurs())));
-    return 0;
-  }
-  const auto = await chooseAuto(existing, o, false);
-  const config: Config = { ...existing };
-  if (auto) config.auto = auto;
-  else delete config.auto;
+  const config = withAgentSettings(existing, settings);
   await saveConfig(p, config);
   let atLogin = false;
   if (role === 'client') atLogin = await clientService(existing, config, o, say);
-  else if ((await serviceState()) === 'running' && (await serviceIsOurs())) {
+  else if (await runsAtLogin()) {
     await installService(); // restart, so the relay service picks it up
     atLogin = true;
   }
-  say(describeAuto(config.auto, atLogin));
-  if (!atLogin && config.auto) say('Start a new Claude Code or Codex session to apply it.');
+  say(describeAuto(config, atLogin));
+  if (!atLogin && autoKinds(config).length) say('Start a new Claude Code or Codex session to apply it.');
   return 0;
+}
+
+/** `handover auto [claude|codex|both|off] [--full-access]`: the older form of `handover agents`. */
+export async function runAuto(p: Paths, o: AgentOptions): Promise<number> {
+  const existing = await loadConfig(p);
+  if (o.auto === undefined && o.fullAccess === undefined) {
+    console.log(describeAuto(existing, await runsAtLogin()));
+    return 0;
+  }
+  return applySettings(p, existing, await chooseSettings(existing, o, false), o, (m) => console.log(m));
+}
+
+const AGENTS_USAGE = 'Usage: handover agents [claude|codex|all] [on|off] [full-access|default-access]';
+
+/**
+ * `handover agents`: lists each agent. `handover agents WHO SETTING...`
+ * changes them: WHO is claude, codex or all; SETTING is on / off (auto-pickup)
+ * and full-access / default-access.
+ */
+export async function runAgents(p: Paths, args: string[]): Promise<number> {
+  const existing = await loadConfig(p);
+  if (!args.length) {
+    const settings = agentSettings(existing);
+    const rows = [['agent', 'installed', 'MCP', 'auto-pickup', 'access']];
+    for (const k of AGENT_KINDS) {
+      const a = ADAPTERS[k];
+      const installed = !!a.bin();
+      rows.push([
+        `${a.label} (${agentAddress(k, agentName(existing))})`,
+        installed ? 'yes' : 'no',
+        installed ? await a.mcpState() : '-',
+        settings[k]?.auto ? 'on' : 'off',
+        settings[k]?.fullAccess ? '⚠️ full' : 'default',
+      ]);
+    }
+    const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
+    for (const r of rows) console.log(r.map((c, i) => c.padEnd(widths[i]!)).join('  ').trimEnd());
+    console.log(`\n${describeAuto(existing, await runsAtLogin())}`);
+    return 0;
+  }
+  const [who, ...words] = args;
+  if (!words.length) throw new Error(AGENTS_USAGE);
+  const all = who === 'all' || who === 'both';
+  const kinds = all ? [...AGENT_KINDS] : [parseAgentKind(who!, 'handover agents')];
+  const settings: AgentSettings = structuredClone(agentSettings(existing));
+  for (const word of words) {
+    for (const k of kinds) {
+      const s = { ...settings[k] };
+      if (word === 'on') {
+        if (!ADAPTERS[k].bin()) {
+          if (all) continue; // "all": the agents installed here
+          throw new Error(`the ${k} CLI isn't installed here`);
+        }
+        s.auto = true;
+      } else if (word === 'off') s.auto = false;
+      else if (word === 'full-access') s.fullAccess = true;
+      else if (word === 'default-access') s.fullAccess = false;
+      else throw new Error(AGENTS_USAGE);
+      settings[k] = s;
+    }
+  }
+  return applySettings(p, existing, settings, {}, (m) => console.log(m));
 }
 
 // ── host ────────────────────────────────────────────────────────────────
@@ -195,18 +253,17 @@ export interface HostOptions extends AgentOptions {
 export async function becomeHost(p: Paths, o: HostOptions, say: Say): Promise<Config> {
   const existing = await loadConfig(p);
   await wireAgents(o, say);
-  const auto = await chooseAuto(existing, o, o.ask === true);
+  const settings = await chooseSettings(existing, o, o.ask === true);
   const wasHost = roleOf(existing) === 'host';
   const port = o.port ?? existing.relay?.port ?? DEFAULT_PORT;
-  const config: Config = {
+  const config: Config = withAgentSettings({
     role: 'host',
     agent: o.agent ?? agentName(existing),
     // Keep the host's token across reruns; a former client gets its own.
     token: process.env.HANDOVER_TOKEN || (wasHost ? existing.token : undefined) || generateToken(),
     url: `http://127.0.0.1:${port}`,
     relay: { ...(wasHost ? existing.relay : {}), port, ...(o.tunnel ? { tunnel: o.tunnel } : {}) },
-    ...(auto ? { auto } : {}),
-  };
+  }, settings);
   validateAgent(config.agent, 'agent name');
   await saveConfig(p, config);
   say(`Saved ${p.config}`);
@@ -228,7 +285,7 @@ export async function becomeHost(p: Paths, o: HostOptions, say: Say): Promise<Co
   } else {
     say('The relay runs while Claude Code, Codex or a handover command is open (handover service install keeps it running)');
   }
-  say(describeAuto(config.auto, atLogin));
+  say(describeAuto(config, atLogin));
   return config;
 }
 
@@ -291,14 +348,14 @@ export async function becomeClient(p: Paths, o: JoinOptions, say: Say): Promise<
   if (state === 'unreachable') say(`Warning: the host at ${url} isn't answering right now; saved anyway`);
 
   await wireAgents(o, say);
-  const auto = await chooseAuto(existing, o, o.interactive === true);
-  const config: Config = { role: 'client', url, discover: discovered, token, agent: o.agent ?? agentName(existing), ...(auto ? { auto } : {}) };
+  const settings = await chooseSettings(existing, o, o.interactive === true);
+  const config = withAgentSettings({ role: 'client', url, discover: discovered, token, agent: o.agent ?? agentName(existing) }, settings);
   validateAgent(config.agent, 'agent name');
   await saveConfig(p, config);
   say(`Saved ${p.config}`);
 
   // A client never runs a relay; its service (if any) only takes handovers.
-  say(describeAuto(config.auto, await clientService(existing, config, o, say)));
+  say(describeAuto(config, await clientService(existing, config, o, say)));
   return config;
 }
 

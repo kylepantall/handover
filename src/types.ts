@@ -141,7 +141,9 @@ export interface Config {
   agent?: string;
   /** Host only: relay settings. */
   relay?: RelayConfig;
-  /** Take handovers automatically with a coding agent's CLI (off when absent). */
+  /** Per-agent settings: auto-pickup and access. */
+  agents?: AgentSettings;
+  /** @deprecated 0.9–0.10 auto-pickup; read into `agents`. */
   auto?: AutoPickup;
   /** @deprecated v0.4–0.6 peer mode; read as host. */
   peer?: boolean;
@@ -151,6 +153,16 @@ export interface Config {
 export const AGENT_KINDS = ['claude', 'codex'] as const;
 export type AgentKind = (typeof AGENT_KINDS)[number];
 
+export interface AgentSetting {
+  /** Take handovers automatically with this agent's CLI. */
+  auto?: boolean;
+  /** Skip the agent's permission prompts and sandbox (opt-in only: tasks come from other machines). */
+  fullAccess?: boolean;
+}
+
+export type AgentSettings = Partial<Record<AgentKind, AgentSetting>>;
+
+/** @deprecated 0.9–0.10 config shape. */
 export interface AutoPickup {
   /** The agents that take handovers here, each with its own worker; one name in 0.9 configs. */
   with: AgentKind | AgentKind[];

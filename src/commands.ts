@@ -15,7 +15,7 @@ import { generateToken, lanAddresses, startTunnel } from './server.ts';
 import { agentAddress, isTerminal } from './store.ts';
 import { buildMcpServer } from './tools.ts';
 import { acquireWorkerLock, agentWork, WORKER_ENV, workLoop, type WorkOptions } from './worker.ts';
-import { autoKinds } from './agents.ts';
+import { autoKinds, fullAccessFor } from './agents.ts';
 import { STATUS, TUNNELS, type AgentKind, type Config, type Task, type TaskStatus, type Tunnel } from './types.ts';
 
 export const EXIT = { ok: 0, failed: 1, cancelled: 2, timeout: 3, usage: 64, interrupted: 130 } as const;
@@ -60,7 +60,7 @@ export async function serve(p: Paths, o: ServeOptions): Promise<void> {
     // A client's service only takes handovers; it never runs a relay.
     if (startAuto(p, config, 'service')) return;
     throw new Error(
-      'this machine is a client: it uses the host’s relay. Turn on auto-pickup (handover auto claude|codex), or run handover host to make this machine the host.'
+      'this machine is a client: it uses the host’s relay. Turn on auto-pickup (handover agents all on), or run handover host to make this machine the host.'
     );
   }
   startAuto(p, config, 'service');
@@ -220,7 +220,7 @@ export interface WorkerOptions {
 
 export async function worker(p: Paths, o: WorkerOptions): Promise<number> {
   const config = await loadConfig(p);
-  const kinds = o.with ? [o.with] : o.exec ? [] : autoKinds(config.auto);
+  const kinds = o.with ? [o.with] : o.exec ? [] : autoKinds(config);
   if (!o.exec && !kinds.length) {
     console.error('worker needs --with claude|codex or --exec "<agent command>"');
     return EXIT.usage;
@@ -233,10 +233,9 @@ export async function worker(p: Paths, o: WorkerOptions): Promise<number> {
     await workLoop(api, { agent: o.agent ?? machine, command: o.exec, ...timing });
     return EXIT.ok;
   }
-  const fullAccess = o.fullAccess ?? (o.with ? false : config.auto?.fullAccess === true);
   const works: WorkOptions[] = [];
   for (const kind of kinds) {
-    const work = agentWork(p, kind, fullAccess, o.agent ?? machine, 'worker');
+    const work = agentWork(p, kind, o.fullAccess ?? fullAccessFor(config, kind), o.agent ?? machine, 'worker');
     if (!work) {
       console.error(`worker: the ${kind} CLI isn't installed`);
       return EXIT.failed;
@@ -260,9 +259,9 @@ export async function worker(p: Paths, o: WorkerOptions): Promise<number> {
  * inside an agent the worker started.
  */
 export function startAuto(p: Paths, config: Config, via: string): boolean {
-  const auto = config.auto;
-  if (!auto || process.env[WORKER_ENV]) return false;
-  for (const kind of autoKinds(auto)) void autoAgent(p, config, kind, auto.fullAccess === true, via);
+  const kinds = autoKinds(config);
+  if (!kinds.length || process.env[WORKER_ENV]) return false;
+  for (const kind of kinds) void autoAgent(p, config, kind, fullAccessFor(config, kind), via);
   return true;
 }
 

@@ -39,11 +39,11 @@ One machine is the **host**: it runs the relay that holds the queue. Every other
 
 | | |
 |---|---|
-| Runs | `claude -p --allowedTools mcp__handover` or `codex exec --skip-git-repo-check -`, briefing on stdin, in `<config>/work/<id>` |
-| Permissions | The agent's own settings. `--full-access` adds `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`, and doctor warns |
+| Runs | `claude -p --allowedTools mcp__handover` or `codex exec --skip-git-repo-check -c mcp_servers.handover.default_tools_approval_mode=approve --sandbox workspace-write -`, briefing on stdin, in `<config>/work/<id>` |
+| Permissions | Per agent (`agents` in config.json). Default: Claude Code's own settings, Codex writes only in the task folder; both may use handover's tools. Full access adds `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`, and doctor warns |
 | Where | The login service (`serve`) on macOS/Linux, on both roles. On Windows (no service by default) inside handover's MCP server while Claude Code or Codex is open. One worker per agent per machine (`worker-claude.lock`, `worker-codex.lock` hold its pid); other processes check every 30 s and take over when it exits. Never inside an agent the worker started |
-| Result | The agent calls `handover_complete`; if it doesn't, its stdout is the output (exit 0 → success) |
-| Change it | `handover auto claude\|codex\|off [--full-access]`. On a client it installs or removes the login service; on a host it restarts a running one |
+| Result | The agent calls `handover_complete`; if it doesn't, its stdout is the output: success on exit 0, unless it starts with `FAILED:` |
+| Change it | `handover agents WHO on\|off\|full-access\|default-access` (WHO: claude, codex, all; `handover auto` is the older form). On a client it installs or removes the login service; on a host it restarts a running one |
 
 ## Addresses
 

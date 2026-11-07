@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { ADAPTERS, autoKinds, autoSummary } from './agents.ts';
+import { ADAPTERS, autoKinds, autoSummary, fullAccessFor } from './agents.ts';
 import { hookInstalled } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, endpoint, loadConfig, roleOf } from './config.ts';
@@ -67,7 +67,7 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     else if (state === 'unauthorized') add('host', 'fail', `${url} rejected the token`, 'handover join (with the token from handover link on the host)');
     else
       add('host', 'fail', `${url} not answering`, 'Is the host on? A Windows host runs its relay while Claude Code is open there; handover doctor on the host');
-    if (!config.auto && ['running', 'stopped'].includes(await serviceState()) && (await serviceIsOurs()))
+    if (!autoKinds(config).length && ['running', 'stopped'].includes(await serviceState()) && (await serviceIsOurs()))
       add('service', 'warn', 'this client has a login service but auto-pickup is off', 'handover service uninstall');
   }
 
@@ -104,14 +104,14 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
   }
 
   if (role) {
-    const auto = config.auto;
     const svc = await serviceState();
     const atLogin = svc === 'running' && (await serviceIsOurs());
-    const kinds = autoKinds(auto);
+    const kinds = autoKinds(config);
     const missing = kinds.filter((k) => !ADAPTERS[k]?.bin());
-    if (!auto) add('auto-pickup', 'info', 'off: tasks wait until you ask an agent', 'handover auto claude|codex|both');
-    else if (missing.length) add('auto-pickup', 'fail', `${missing.join(', ')} CLI not found`, 'install it, or handover auto off');
-    else add('auto-pickup', auto.fullAccess ? 'warn' : 'ok', autoSummary(auto, atLogin), auto.fullAccess ? `handover auto ${kinds.join(',')}` : undefined);
+    const full = kinds.filter((k) => fullAccessFor(config, k));
+    if (!kinds.length) add('auto-pickup', 'info', 'off: tasks wait until you ask an agent', 'handover agents all on');
+    else if (missing.length) add('auto-pickup', 'fail', `${missing.join(', ')} CLI not found`, `install it, or handover agents ${missing[0]} off`);
+    else add('auto-pickup', full.length ? 'warn' : 'ok', autoSummary(config, atLogin), full.length ? `handover agents ${full.length > 1 ? 'all' : full[0]} default-access` : undefined);
   }
   return checks;
 }
