@@ -5,7 +5,7 @@ import { endpoint, loadConfig, roleOf } from './config.ts';
 import { readFile } from 'node:fs/promises';
 import { runDoctor } from './doctor.ts';
 import { formatLink, linkInfo } from './link.ts';
-import { ADAPTERS, parseAgentKind } from './agents.ts';
+import { ADAPTERS, parseAgentKind, parseAgentKinds } from './agents.ts';
 import { removeHook } from './claude.ts';
 import { paths } from './paths.ts';
 import { installService, serviceState, uninstallService } from './service.ts';
@@ -24,17 +24,18 @@ Usage: handover <command>
         [--agent NAME] [--port N] [--tunnel tailscale|cloudflared] [--no-service] [AGENT FLAGS]
   join [HOST_URL]               Join a host: asks for its token (or reads HANDOVER_TOKEN) and finds it on
                                 this network; HOST_URL only if it's elsewhere [--agent NAME] [AGENT FLAGS]
-        AGENT FLAGS: [--auto claude|codex|off] [--full-access] [--no-claude] [--no-codex] [--no-service]
+        AGENT FLAGS: [--auto claude|codex|both|off] [--full-access] [--no-claude] [--no-codex] [--no-service]
                      Both add handover to Claude Code and Codex when installed, and ask (in a
                      terminal) whether one takes handovers automatically
   setup                         Menu: host or join
-  auto [claude|codex|off]       Show or change auto-pickup: run each handover unattended with that agent
+  auto [claude|codex|both|off]  Show or change auto-pickup: run each handover unattended with that agent
         [--full-access]         ...skipping its permission prompts and sandbox (⚠️ tasks come from other machines)
   test [--timeout SEC] [--json] Check this machine reaches the host, then a round robin: every online
                                 machine pings every other. Exits 1 if any link fails
   listen                        Answer test pings on a machine without Claude Code open
   wait --objective TEXT         Create a handover and block until an agent completes it
-        [--context TEXT | --context-file PATH] [--to AGENT] [--priority N]
+        [--context TEXT | --context-file PATH] [--priority N]
+        [--to MACHINE | claude | codex | codex@MACHINE]
         [--id ID] [--out DIR] [--timeout SEC] [--json]
   worker [--with claude|codex | --exec "CMD"]
                                 Take the next handover, pipe its briefing to the agent, repeat (default:
@@ -53,7 +54,8 @@ Usage: handover <command>
   update [--check] [--ref R]    Install the latest version from GitHub
   unlink                        Remove this install's MCP server from Claude Code and Codex, and its
                                 SessionStart hook (claude-unlink: the same)
-  mcp                           MCP server over stdio; Claude Code and Codex start this
+  mcp [--as claude|codex]       MCP server over stdio; Claude Code and Codex start this. --as: claim tasks
+                                as claude@MACHINE / codex@MACHINE, so --to codex reaches it
   hook                          Claude Code SessionStart hook
 
 Config: ~/.config/handover/config.json, %APPDATA%\\handover on Windows (HANDOVER_HOME overrides).
@@ -68,6 +70,7 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
   wait: { objective: s, context: s, 'context-file': s, id: s, to: s, priority: s, out: s, timeout: s, json: b },
   worker: { exec: s, with: s, 'full-access': b, agent: s, lease: s, interval: s, once: b },
   auto: { 'full-access': b },
+  mcp: { as: s },
   list: { status: s, for: s },
   serve: { port: s, host: s, token: s, tunnel: s, data: s, lease: s, 'max-attempts': s, retention: s, log: s, home: s },
   link: { json: b },
@@ -89,9 +92,9 @@ const tunnel = (v: unknown): Tunnel | undefined => {
   return v as Tunnel;
 };
 
-function autoArg(v: unknown, flag: string): AgentKind | 'off' | undefined {
+function autoArg(v: unknown, flag: string): AgentKind[] | 'off' | undefined {
   if (v == null) return undefined;
-  return v === 'off' ? 'off' : parseAgentKind(String(v), flag);
+  return v === 'off' ? 'off' : parseAgentKinds(String(v), flag);
 }
 
 /** --auto, --full-access, --no-claude, --no-codex, --no-service. */
@@ -155,8 +158,8 @@ async function main(argv: string[]): Promise<number | null> {
       return runJoin(p, { ...agentOptions(o), url, agent: str('agent') });
     }
     case 'auto': {
-      const [choice, extra] = positionals;
-      if (extra) throw new Error('Usage: handover auto [claude|codex|off] [--full-access]');
+      // handover auto claude codex = handover auto claude,codex = handover auto both
+      const choice = positionals.length ? positionals.join(',') : undefined;
       return runAuto(p, { auto: autoArg(choice, 'handover auto'), fullAccess: o['full-access'] ? true : undefined });
     }
     case 'test':
@@ -201,7 +204,7 @@ async function main(argv: string[]): Promise<number | null> {
     case 'list':
       return list(p, { status: str('status'), for: str('for') });
     case 'mcp':
-      await mcp(p);
+      await mcp(p, { as: o.as == null ? undefined : parseAgentKind(String(o.as), '--as') });
       return null;
     case 'hook':
       return hook(p);

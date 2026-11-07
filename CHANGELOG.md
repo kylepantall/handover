@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0
+
+- Several agents per machine: each has its own address, `claude@pc` and `codex@pc`. `--to codex` reaches Codex on any machine, `--to codex@pc` one agent, and `--to pc` any agent there, as before. ⚠️ Update the host first: the matching happens in its relay.
+- Auto-pickup with both agents: `--auto both` (or the setup menu), `handover auto claude codex`. Each agent gets its own worker, so they run in parallel.
+- Being told when a delegated task finishes: `handover_create` tells the agent to run `handover wait --id …` in the background, which wakes Claude Code when it exits. New `handover_wait` tool for agents without background commands.
+- MCP servers are registered as `handover mcp --as claude|codex`; `host` / `join` update older entries of this install.
+
 ## 0.9.0
 
 - Codex support: `host` and `join` add handover's MCP server to Codex as well as Claude Code, for each CLI that's installed. `--no-codex` / `-NoCodex` skips it.

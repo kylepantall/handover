@@ -10,7 +10,7 @@
 
 import * as ui from '@clack/prompts';
 import { existsSync } from 'node:fs';
-import { ADAPTERS, describeAuto, installedAgents } from './agents.ts';
+import { ADAPTERS, autoKinds, describeAuto, installedAgents, parseAgentKinds } from './agents.ts';
 import { installHook } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
@@ -68,8 +68,8 @@ export interface AgentOptions {
   claude?: boolean;
   /** false: leave Codex alone. */
   codex?: boolean;
-  /** Auto-pickup agent, or 'off'. Unset: ask in a terminal, else keep the current choice. */
-  auto?: AgentKind | 'off';
+  /** Auto-pickup agents, or 'off'. Unset: ask in a terminal, else keep the current choice. */
+  auto?: AgentKind[] | 'off';
   /** Auto-pickup without the agent's permission prompts or sandbox. */
   fullAccess?: boolean;
   /** Login service: default on macOS/Linux, off on Windows (docs/flow.md). */
@@ -83,10 +83,11 @@ async function wireAgents(o: AgentOptions, say: Say): Promise<void> {
   for (const a of installedAgents()) {
     if (skipped(o, a.kind)) continue;
     try {
-      if ((await a.mcpState()) === 'registered') say(`${a.label}: MCP server already registered`);
+      const state = await a.mcpState();
+      if (state === 'registered') say(`${a.label}: MCP server already registered`);
       else {
-        await a.register();
-        say(`${a.label}: added the "handover" MCP server (start a new session to load it)`);
+        await a.register(state);
+        say(`${a.label}: ${state === 'outdated' ? 'updated' : 'added'} the "handover" MCP server (start a new session to load it)`);
       }
       if (a.kind === 'claude' && (await installHook()) === 'added') say('Claude Code: pending handovers now show at session start');
     } catch (err) {
@@ -97,32 +98,32 @@ async function wireAgents(o: AgentOptions, say: Say): Promise<void> {
 
 /** The auto-pickup setting after setup: from the flags, a prompt, or the current config. */
 async function chooseAuto(existing: Config, o: AgentOptions, ask: boolean): Promise<AutoPickup | undefined> {
-  const pick = (kind: AgentKind, keptFullAccess?: boolean): AutoPickup => ({
-    with: kind,
-    ...((o.fullAccess ?? keptFullAccess) ? { fullAccess: true } : {}),
-  });
+  const current = autoKinds(existing.auto);
+  const pick = (kinds: AgentKind[]): AutoPickup => {
+    // Full access carries over only for the same agents.
+    const kept = existing.auto?.fullAccess && kinds.every((k) => current.includes(k));
+    return { with: kinds, ...((o.fullAccess ?? kept) ? { fullAccess: true } : {}) };
+  };
   if (o.auto === 'off') return undefined;
   if (o.auto) {
-    if (skipped(o, o.auto)) throw new Error(`--auto ${o.auto} needs handover added to ${o.auto}: drop --no-${o.auto}`);
-    if (!ADAPTERS[o.auto].bin()) throw new Error(`--auto ${o.auto}: the ${o.auto} CLI isn't installed here`);
+    for (const kind of o.auto) {
+      if (skipped(o, kind)) throw new Error(`--auto ${kind} needs handover added to ${kind}: drop --no-${kind}`);
+      if (!ADAPTERS[kind].bin()) throw new Error(`--auto ${kind}: the ${kind} CLI isn't installed here`);
+    }
     return pick(o.auto);
   }
   const agents = installedAgents().filter((a) => !skipped(o, a.kind));
   if (ask && agents.length) {
+    const hint = 'runs each task unattended, with your usual permission settings';
+    const options = agents.map((a) => ({ value: a.kind as string, label: `Yes, with ${a.label}`, hint }));
+    if (agents.length > 1) options.push({ value: agents.map((a) => a.kind).join(','), label: 'Yes, with both', hint: 'each takes tasks addressed to it, and either takes the rest' });
+    options.push({ value: 'off', label: 'No', hint: 'tasks wait until you ask an agent to pick them up' });
     const choice = cancelled(
-      await ui.select<AgentKind | 'off'>({
-        message: 'Take handovers automatically on this machine?',
-        initialValue: existing.auto?.with ?? agents[0]!.kind,
-        options: [
-          ...agents.map((a) => ({ value: a.kind, label: `Yes, with ${a.label}`, hint: 'runs each task unattended, with your usual permission settings' })),
-          { value: 'off' as const, label: 'No', hint: 'tasks wait until you ask an agent to pick them up' },
-        ],
-      })
+      await ui.select<string>({ message: 'Take handovers automatically on this machine?', initialValue: current.length ? current.join(',') : agents[0]!.kind, options })
     );
-    if (choice === 'off') return undefined;
-    return pick(choice, existing.auto?.with === choice ? existing.auto.fullAccess : undefined);
+    return choice === 'off' ? undefined : pick(parseAgentKinds(choice, 'auto-pickup'));
   }
-  return existing.auto ? pick(existing.auto.with, existing.auto.fullAccess) : undefined;
+  return current.length ? pick(current) : undefined;
 }
 
 /**

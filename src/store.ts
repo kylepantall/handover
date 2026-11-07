@@ -77,8 +77,20 @@ const PING_KEEP_MS = 5 * 60_000;
 /** An agent counts as online if it checked in within this long. */
 export const PRESENCE_TTL_MS = 90_000;
 
-/** A task is visible to `agent` when it is unaddressed or addressed to that agent. */
-const eligibleFor = (task: Task, agent: string | null) => !task.to || task.to === agent;
+/**
+ * A task is visible to `agent` when it is unaddressed or addressed to it. An
+ * agent named `kind@machine` (e.g. codex@pc) also takes tasks addressed to its
+ * machine ("pc": any agent there) or its kind ("codex": that agent anywhere).
+ */
+export function eligibleFor(task: Pick<Task, 'to'>, agent: string | null): boolean {
+  if (!task.to || task.to === agent) return true;
+  const at = agent?.indexOf('@') ?? -1;
+  if (at <= 0) return false;
+  return task.to === agent!.slice(0, at) || task.to === agent!.slice(at + 1);
+}
+
+/** `kind@machine`: the address of one agent on a machine. */
+export const agentAddress = (kind: string, machine: string): string => `${kind}@${machine}`;
 
 export interface StoreOptions {
   /** JSON file to persist the queue to; null keeps it in memory. */

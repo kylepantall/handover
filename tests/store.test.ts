@@ -178,3 +178,17 @@ test('presence: agents checked in recently, with everything running there', () =
   now.advance(60_000);
   expect(s.agents().map((a) => a.agent)).toEqual(['mac']); // pc went quiet
 });
+
+test('targeting: a machine, an agent kind, or one agent on one machine', async () => {
+  const { eligibleFor } = await import('../src/store.ts');
+  const ok = (to: string | undefined, agent: string) => eligibleFor({ to: to ?? null } as never, agent);
+  expect(ok(undefined, 'codex@pc')).toBe(true);
+  expect(ok('pc', 'codex@pc')).toBe(true);
+  expect(ok('codex', 'codex@pc')).toBe(true);
+  expect(ok('codex@pc', 'codex@pc')).toBe(true);
+  expect(ok('claude', 'codex@pc')).toBe(false);
+  expect(ok('codex@mac', 'codex@pc')).toBe(false);
+  expect(ok('mac', 'codex@pc')).toBe(false);
+  expect(ok('pc', 'pc')).toBe(true);
+  expect(ok('codex', 'pc')).toBe(false);
+});
