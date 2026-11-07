@@ -9,7 +9,8 @@ import { selfCommand } from './claude.ts';
 import { runProcess } from './process.ts';
 import { AGENT_KINDS, type AgentKind, type AutoPickup } from './types.ts';
 
-export type McpState = 'registered' | 'missing' | 'not-installed';
+/** 'outdated': registered by this install before agents had their own address (no `--as`). */
+export type McpState = 'registered' | 'outdated' | 'missing' | 'not-installed';
 export type UnlinkResult = 'removed' | 'not-registered' | 'other-install' | 'not-installed';
 
 export interface Adapter {
@@ -18,7 +19,8 @@ export interface Adapter {
   /** Path of the agent's CLI, if installed. */
   bin(): string | undefined;
   mcpState(): Promise<McpState>;
-  register(): Promise<void>;
+  /** Adds the MCP server; pass the state mcpState() just returned to skip asking again. */
+  register(state?: McpState): Promise<void>;
   /** Removes the "handover" MCP server if it points at this install. */
   unregister(): Promise<UnlinkResult>;
   /** argv running one task unattended, prompt on stdin. */
@@ -36,32 +38,39 @@ function adapter(
 ): Adapter {
   const bin = () => which(kind);
   const get = async (cli: string) => runProcess(cli, ['mcp', 'get', 'handover'], { timeoutMs: 20_000 }).catch(() => null);
+  const mcpState = async (): Promise<McpState> => {
+    const cli = bin();
+    if (!cli) return 'not-installed';
+    const r = await get(cli);
+    if (r?.code !== 0) return 'missing';
+    return r.stdout.includes(selfCommand()[0]!) && !r.stdout.includes(`--as ${kind}`) ? 'outdated' : 'registered';
+  };
+  const unregister = async (): Promise<UnlinkResult> => {
+    const cli = bin();
+    if (!cli) return 'not-installed';
+    const current = await get(cli);
+    if (!current || current.code !== 0) return 'not-registered';
+    const [exe] = selfCommand();
+    if (!current.stdout.includes(exe!)) return 'other-install';
+    const r = await runProcess(cli, ['mcp', 'remove', 'handover', ...remove], { timeoutMs: 30_000 });
+    if (r.code !== 0) throw failure(`${kind} mcp remove`, r);
+    return 'removed';
+  };
   return {
     kind,
     label,
     bin,
-    async mcpState() {
-      const cli = bin();
-      if (!cli) return 'not-installed';
-      return (await get(cli))?.code === 0 ? 'registered' : 'missing';
-    },
-    async register() {
+    mcpState,
+    async register(state) {
       const cli = bin();
       if (!cli) throw new Error(`${kind} CLI not found`);
-      const r = await runProcess(cli, ['mcp', 'add', ...add, 'handover', '--', ...selfCommand('mcp')], { timeoutMs: 30_000 });
+      // Replace an outdated entry of ours; never another install's.
+      if ((state ?? (await mcpState())) === 'outdated') await unregister();
+      // --as: the MCP server claims tasks as kind@machine (e.g. codex@pc).
+      const r = await runProcess(cli, ['mcp', 'add', ...add, 'handover', '--', ...selfCommand('mcp', '--as', kind)], { timeoutMs: 30_000 });
       if (r.code !== 0) throw failure(`${kind} mcp add`, r);
     },
-    async unregister() {
-      const cli = bin();
-      if (!cli) return 'not-installed';
-      const current = await get(cli);
-      if (!current || current.code !== 0) return 'not-registered';
-      const [exe] = selfCommand();
-      if (!current.stdout.includes(exe!)) return 'other-install';
-      const r = await runProcess(cli, ['mcp', 'remove', 'handover', ...remove], { timeoutMs: 30_000 });
-      if (r.code !== 0) throw failure(`${kind} mcp remove`, r);
-      return 'removed';
-    },
+    unregister,
     execArgv: (full) => [bin() ?? kind, ...exec(full)],
   };
 }
@@ -91,11 +100,23 @@ export function parseAgentKind(value: string, flag: string): AgentKind {
   throw new Error(`${flag} must be ${AGENT_KINDS.join(' or ')}`);
 }
 
+/** The agents auto-pickup runs (0.9 configs hold one name, later ones a list). */
+export const autoKinds = (auto: AutoPickup | undefined): AgentKind[] => (!auto ? [] : Array.isArray(auto.with) ? auto.with : [auto.with]);
+
+const labels = (kinds: AgentKind[]) => kinds.map((k) => ADAPTERS[k].label).join(' and ');
+
+/** `claude`, `codex`, `claude,codex` or `both` → agent kinds. */
+export function parseAgentKinds(value: string, flag: string): AgentKind[] {
+  const parts = value === 'both' ? [...AGENT_KINDS] : value.split(',').map((v) => v.trim()).filter(Boolean);
+  if (!parts.length) throw new Error(`${flag} needs ${AGENT_KINDS.join(', ')} or both`);
+  return [...new Set(parts.map((v) => parseAgentKind(v, flag)))];
+}
+
 /** What auto-pickup does here, e.g. "Codex, with your usual permission settings; runs at login". */
 export function autoSummary(auto: AutoPickup | undefined, atLogin: boolean): string {
   if (!auto) return 'off (turn on with handover auto claude|codex)';
   const how = auto.fullAccess ? '⚠️ full access (no permission prompts or sandbox)' : 'with your usual permission settings';
-  return `${ADAPTERS[auto.with].label}, ${how}; ${atLogin ? 'runs at login' : 'runs while Claude Code or Codex is open'}`;
+  return `${labels(autoKinds(auto))}, ${how}; ${atLogin ? 'runs at login' : 'runs while Claude Code or Codex is open'}`;
 }
 
 export const describeAuto = (auto: AutoPickup | undefined, atLogin: boolean) => `Auto-pickup: ${autoSummary(auto, atLogin)}`;

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { ADAPTERS, autoSummary } from './agents.ts';
+import { ADAPTERS, autoKinds, autoSummary } from './agents.ts';
 import { hookInstalled } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, endpoint, loadConfig, roleOf } from './config.ts';
@@ -90,6 +90,8 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     const state = await a.mcpState();
     if (state === 'registered') add(area, 'ok', 'handover MCP server registered');
     else if (state === 'missing') add(area, 'warn', 'MCP server not registered', role === 'host' ? 'handover host' : 'handover join');
+    else if (state === 'outdated')
+      add(area, 'warn', 'MCP server registered without its own address, so tasks sent to it are missed', role === 'host' ? 'handover host' : 'handover join');
     else add(area, 'info', `${kind} CLI not found`);
     if (kind === 'claude' && state !== 'not-installed') {
       try {
@@ -105,9 +107,11 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     const auto = config.auto;
     const svc = await serviceState();
     const atLogin = svc === 'running' && (await serviceIsOurs());
-    if (!auto) add('auto-pickup', 'info', 'off: tasks wait until you ask an agent', 'handover auto claude|codex');
-    else if (!ADAPTERS[auto.with]?.bin()) add('auto-pickup', 'fail', `${auto.with} CLI not found`, 'install it, or handover auto off');
-    else add('auto-pickup', auto.fullAccess ? 'warn' : 'ok', autoSummary(auto, atLogin), auto.fullAccess ? 'handover auto ' + auto.with : undefined);
+    const kinds = autoKinds(auto);
+    const missing = kinds.filter((k) => !ADAPTERS[k]?.bin());
+    if (!auto) add('auto-pickup', 'info', 'off: tasks wait until you ask an agent', 'handover auto claude|codex|both');
+    else if (missing.length) add('auto-pickup', 'fail', `${missing.join(', ')} CLI not found`, 'install it, or handover auto off');
+    else add('auto-pickup', auto.fullAccess ? 'warn' : 'ok', autoSummary(auto, atLogin), auto.fullAccess ? `handover auto ${kinds.join(',')}` : undefined);
   }
   return checks;
 }

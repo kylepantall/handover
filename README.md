@@ -27,6 +27,7 @@ It prints a **join command** that contains the token. Show it again any time wit
 ◆ Take handovers automatically on this machine?
 │ ● Yes, with Claude Code   (runs each task unattended, with your usual permission settings)
 │ ○ Yes, with Codex
+│ ○ Yes, with both
 │ ○ No                      (tasks wait until you ask an agent to pick them up)
 ```
 
@@ -56,9 +57,9 @@ Paste this into Claude Code or Codex on each machine:
 ```text
 Set up Handover on this machine: https://github.com/kylepantall/handover
 1. Ask me two things: is this machine the host, or does it join an existing host? And should it
-   take handovers automatically with Claude Code, Codex, or not at all?
+   take handovers automatically with Claude Code, Codex, both, or not at all?
 2. Install it with the README's Quick start command for this OS, adding --no-setup (Windows: -NoSetup).
-3. Host: run `handover host` (add `--auto claude` or `--auto codex` if I said yes). Don't repeat the
+3. Host: run `handover host` (add `--auto claude`, `--auto codex` or `--auto both` if I said yes). Don't repeat the
    token it prints; tell me to run `handover link` myself when I want to share it.
    Join: never ask me for the token in chat. Tell me to run `handover join` in my own terminal (it
    asks for the token privately, and about auto-pickup) and wait until I say it's done.
@@ -66,11 +67,32 @@ Set up Handover on this machine: https://github.com/kylepantall/handover
 5. Run `handover doctor` and `handover test`, then tell me which lines aren't ✓ and how to fix them.
 ```
 
+## Agents working together
+
+Every agent has its own address: `claude@pc`, `codex@pc`. Send a task to whoever should do it:
+
+| `--to` (or `to` in `handover_create`) | Who can take it |
+|---|---|
+| (nothing) | Any agent |
+| `pc` | Any agent on that machine |
+| `codex` / `claude` | That agent, on any machine |
+| `codex@pc` | Only Codex on `pc` |
+
+**Example:** ask Claude Code: *"Have Codex make the graphics for this page, wait for them, then finish the page and open a PR."* Claude calls `handover_create` with `to: "codex"`, then waits in the background with `handover wait --id …`. Claude Code wakes the session when Codex finishes, and Claude gets the files and carries on. If the request was itself a handover, Claude ends with `handover_complete`, putting the PR link in the output.
+
+| Waiting for a result | How |
+|---|---|
+| Claude Code | Runs `handover wait --id …` in the background and is woken when it exits |
+| Codex and other agents | Call the `handover_wait` tool (it returns after 50 s if the task isn't done: call it again) |
+| You, in a terminal | `handover wait --id …` |
+
+⚠️ Each agent's auto-pickup worker does one task at a time. A task it's running that delegates to the same agent on the same machine (Claude's worker → `claude@pc`) waits until it times out. Delegate to the other agent or another machine.
+
 ## How agents pick up tasks
 
 | Setup | What happens |
 |---|---|
-| Auto-pickup on (the setup question, or `handover auto claude\|codex`) | Each task runs unattended with `claude -p` or `codex exec`, in its own folder. macOS/Linux: runs at login. Windows: runs while Claude Code or Codex is open |
+| Auto-pickup on (the setup question, or `handover auto claude\|codex\|both`) | Each task runs unattended with `claude -p` or `codex exec`, in its own folder. With both, each agent has its own worker, so they run at the same time. macOS/Linux: runs at login. Windows: runs while Claude Code or Codex is open |
 | Auto-pickup off | Claude Code shows pending tasks when a session starts. Ask any agent to "pick up the handover", or to "watch for handovers" (`handover_watch`) |
 | Other MCP clients | See [Connect other agents](#connect-other-agents) |
 
@@ -82,7 +104,7 @@ Set up Handover on this machine: https://github.com/kylepantall/handover
 |---|---|
 | `handover host` | Make this machine the host; prints the join commands |
 | `handover join [HOST_URL]` | Join a host (asks for the token). The URL is only needed if the host is on another network |
-| `handover auto [claude\|codex\|off]` | Show or change auto-pickup (`--full-access` ⚠️ skips permission prompts and sandbox) |
+| `handover auto [claude\|codex\|both\|off]` | Show or change auto-pickup (`--full-access` ⚠️ skips permission prompts and sandbox) |
 | `handover test` | Check every machine reaches every other. Exits 1 if any link fails |
 | `handover doctor` | Check the host, the login service, Claude Code, Codex and auto-pickup |
 | `handover wait --objective "…"` | Create a task and block until it's done |
@@ -114,7 +136,7 @@ Removes the login service, the Claude Code and Codex entries, the app, and your 
 |---|---|
 | `--host` / `-Host` | This machine is the host |
 | `--join [URL]` / `-Join [-Url URL]` | Join a host; token from `HANDOVER_TOKEN` or asked for |
-| `--auto claude\|codex\|off` / `-Auto …` | Auto-pickup without being asked |
+| `--auto claude\|codex\|both\|off` / `-Auto …` | Auto-pickup without being asked |
 | `--full-access` / `-FullAccess` | ⚠️ Auto-pickup skips the agent's permission prompts and sandbox |
 | `--agent NAME` / `-Agent NAME` | Agent name (default: hostname) |
 | `--no-claude`, `--no-codex` / `-NoClaude`, `-NoCodex` | Don't add handover to that agent |
@@ -160,7 +182,7 @@ No option: a menu asks host or join. Old `--peer` / `--relay` flags still work (
 | Feature | How |
 |---|---|
 | Order | Highest `priority` first, then oldest |
-| Targeting | `--to <agent>`: only that agent sees or claims it |
+| Targeting | `--to pc`, `--to codex` or `--to codex@pc`: see [Agents working together](#agents-working-together) |
 | Leases | A claim lasts 10 min and is renewed while the agent works; a dead agent's task goes back to the queue and fails after 3 claims |
 | Persistence | `tasks.json` in the config folder; finished tasks are kept for 24 h |
 
@@ -174,7 +196,7 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 | Client | Connect with |
 |---|---|
 | Claude Code, Codex | Automatic during `host` / `join` |
-| Claude Desktop, Cursor (stdio) | `{"command": "~/.local/bin/handover", "args": ["mcp"]}` |
+| Claude Desktop, Cursor (stdio) | `{"command": "~/.local/bin/handover", "args": ["mcp"]}` (claims as the machine) |
 | Any HTTP MCP client | `<host>/mcp` with `Authorization: Bearer <token>` and `X-Handover-Agent: <name>` |
 | ChatGPT (developer mode) | Needs HTTPS: pick a tunnel in `handover setup`, then `<tunnel-url>/mcp?token=<token>&agent=<name>` |
 
@@ -183,11 +205,12 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 | `handover_list` | Tasks you can pick up |
 | `handover_next` | Claim the next task |
 | `handover_watch` | Wait for the next task to arrive, then claim it |
+| `handover_wait` | Wait for a task you created to finish; returns its output and files |
 | `handover_claim` | Claim a specific task |
 | `handover_renew` | Extend your claim on long work |
 | `handover_complete` | Send output and files back; unblocks the waiter |
 | `handover_get` | Read a task without claiming it |
-| `handover_create` | Delegate the other way |
+| `handover_create` | Delegate a task (`to` a machine, an agent, or both) |
 
 </details>
 

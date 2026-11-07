@@ -17,7 +17,7 @@ param(
   [string]$Agent,
   [switch]$NoClaude,
   [switch]$NoCodex,
-  [ValidateSet('claude', 'codex', 'off')][string]$Auto,
+  [ValidateSet('claude', 'codex', 'both', 'off')][string]$Auto,
   [switch]$FullAccess,
   [switch]$NoSetup,
   [switch]$Help,
@@ -38,7 +38,7 @@ function Write-Info([string]$Text) { Write-Host "    $Text" }
 function Install-Handover {
   $repo = if ($env:HANDOVER_REPO) { $env:HANDOVER_REPO } else { 'kylepantall/handover' }
   if ($Help) {
-    Write-Host 'Usage: install.ps1 [-Host | -Join [-Url URL]] [-Agent NAME] [-Auto claude|codex|off] [-FullAccess] [-NoClaude] [-NoCodex] [-NoSetup] [-Version x.y.z]'
+    Write-Host 'Usage: install.ps1 [-Host | -Join [-Url URL]] [-Agent NAME] [-Auto claude|codex|both|off] [-FullAccess] [-NoClaude] [-NoCodex] [-NoSetup] [-Version x.y.z]'
     Write-Host "Installs a $repo release (default latest) under %LOCALAPPDATA%\handover\app and adds it to your user PATH."
     Write-Host '  -Host               Make this machine the host: prints the token and join commands'
     Write-Host '  -Join               Join a host: token from $env:HANDOVER_TOKEN (handover link on the host prints the'

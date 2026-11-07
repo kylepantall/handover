@@ -14,7 +14,7 @@ One machine is the **host**: it runs the relay that holds the queue. Every other
 | Finds the other side | Announces itself on the LAN (`_handover._tcp`, role `host`, one-way network id from the token) | Finds the host by mDNS: no URL. Asks for a URL only if none is found (other network, blocked multicast) |
 | Prints | Token + join commands for macOS/Linux and Windows | "Joined <host> at <url>" |
 | Agents | MCP server in Claude Code (+ SessionStart hook) and Codex, for each CLI that's installed (`--no-claude` / `--no-codex` skip) | Same |
-| Auto-pickup | Asked in a terminal (default: the first agent found); `--auto claude\|codex\|off` in scripts; kept on rerun | Same |
+| Auto-pickup | Asked in a terminal (default: the first agent found; "both" when both are installed); `--auto claude\|codex\|both\|off` in scripts; kept on rerun | Same |
 
 ## Commands
 
@@ -41,9 +41,18 @@ One machine is the **host**: it runs the relay that holds the queue. Every other
 |---|---|
 | Runs | `claude -p --allowedTools mcp__handover` or `codex exec --skip-git-repo-check -`, briefing on stdin, in `<config>/work/<id>` |
 | Permissions | The agent's own settings. `--full-access` adds `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`, and doctor warns |
-| Where | The login service (`serve`) on macOS/Linux, on both roles. On Windows (no service by default) inside handover's MCP server while Claude Code or Codex is open. One worker per machine (`worker.lock` holds its pid); other processes check every 30 s and take over when it exits. Never inside an agent the worker started |
+| Where | The login service (`serve`) on macOS/Linux, on both roles. On Windows (no service by default) inside handover's MCP server while Claude Code or Codex is open. One worker per agent per machine (`worker-claude.lock`, `worker-codex.lock` hold its pid); other processes check every 30 s and take over when it exits. Never inside an agent the worker started |
 | Result | The agent calls `handover_complete`; if it doesn't, its stdout is the output (exit 0 → success) |
 | Change it | `handover auto claude\|codex\|off [--full-access]`. On a client it installs or removes the login service; on a host it restarts a running one |
+
+## Addresses
+
+| Name | Is |
+|---|---|
+| `pc` | The machine (its agent name). Presence, pings and `handover test` use it |
+| `claude@pc`, `codex@pc` | One agent there: its MCP server (registered as `handover mcp --as claude`) and its auto-pickup worker claim tasks under this name |
+
+A task's `to` matches an agent when it's empty, equal to the name, or equal to either half of `kind@machine`. The host's relay does the matching, so update the host first (a 0.9 host only matches exact names).
 
 ## Rules
 

@@ -104,9 +104,31 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     const { url } = await host();
     const { code } = await join(url, '--auto', 'codex');
     expect(code).toBe(0);
-    expect((await loadConfig(paths(path.join(dir, 'home')))).auto).toEqual({ with: 'codex' });
-    for (const name of ['claude', 'codex']) expect(await read(`${name}.mcp`)).toContain(`${CLI} mcp`);
+    expect((await loadConfig(paths(path.join(dir, 'home')))).auto).toEqual({ with: ['codex'] });
+    for (const name of ['claude', 'codex']) expect(await read(`${name}.mcp`)).toContain(`${CLI} mcp --as ${name}`);
     expect(existsSync(path.join(dir, 'claude', 'settings.json'))).toBe(true); // Claude Code's SessionStart hook
+  });
+
+  test('join replaces this install’s pre-0.10 registration (no --as)', async () => {
+    const { url } = await host();
+    await fs.writeFile(path.join(dir, 'codex.mcp'), `${process.execPath} ${CLI} mcp\n`);
+    expect((await join(url)).code).toBe(0);
+    expect(await read('codex.mcp')).toContain('mcp --as codex');
+  });
+
+  test('auto-pickup with both: tasks for codex go to Codex, for claude to Claude, for the machine to either', async () => {
+    const { store, url } = await host();
+    expect((await join(url, '--auto', 'both')).code).toBe(0);
+    expect((await loadConfig(paths(path.join(dir, 'home')))).auto).toEqual({ with: ['claude', 'codex'] });
+    const forCodex = store.create({ objective: 'graphics', to: 'codex' });
+    const forClaude = store.create({ objective: 'the PR', to: 'claude@box' });
+    const forBox = store.create({ objective: 'anything', to: 'box' });
+    const elsewhere = store.create({ objective: 'not here', to: 'codex@other' });
+    start(['serve']);
+    await until(() => [forCodex, forClaude, forBox].every((t) => store.get(t.id).status === 'success'));
+    expect(store.get(forCodex.id)).toMatchObject({ claimedBy: 'codex@box' });
+    expect(store.get(forClaude.id)).toMatchObject({ claimedBy: 'claude@box' });
+    expect(store.get(elsewhere.id).status).toBe('pending');
   });
 
   test('--no-codex leaves Codex alone; --auto with a skipped or missing agent fails', async () => {
@@ -146,7 +168,7 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
   test('one auto-pickup worker per machine: a second process waits, and takes over when the first exits', async () => {
     const { url } = await host();
     expect((await join(url, '--auto', 'codex')).code).toBe(0);
-    const lock = path.join(dir, 'home', 'worker.lock');
+    const lock = path.join(dir, 'home', 'worker-codex.lock');
     const first = start(['mcp']);
     await until(() => existsSync(lock));
     const second = start(['serve']);
@@ -172,7 +194,7 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     const p = paths(path.join(dir, 'home'));
     expect((await loadConfig(p)).auto).toBeUndefined();
     expect((await cli(['auto', 'codex', '--full-access'])).code).toBe(0);
-    expect((await loadConfig(p)).auto).toEqual({ with: 'codex', fullAccess: true });
+    expect((await loadConfig(p)).auto).toEqual({ with: ['codex'], fullAccess: true });
 
     const doctor = (await cli(['doctor', '--json'])).out;
     const checks = JSON.parse(doctor.slice(doctor.indexOf('[')));
@@ -208,5 +230,25 @@ test('handover_watch waits for the next task and claims it', async () => {
   const task: Task = store.create({ objective: 'arrives later' });
   expect(text(await watching)).toContain(`# Handover ${task.id}`);
   expect(store.get(task.id)).toMatchObject({ status: 'claimed', claimedBy: 'watcher' });
+  await mcp.close();
+});
+
+test('handover_wait returns the result once the task finishes', async () => {
+  const store = new Store();
+  const server = buildMcpServer(localApi(store), { agentName: 'claude@mac' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a);
+  const mcp = new Client({ name: 'test', version: '1' });
+  await mcp.connect(b);
+  const json = (r: unknown) => JSON.parse((r as { content: Array<{ text: string }> }).content[0]!.text);
+
+  const created = json(await mcp.callTool({ name: 'handover_create', arguments: { objective: 'draw it', to: 'codex' } }));
+  expect(created.whenDone).toContain(`handover wait --id ${created.id}`);
+  expect(json(await mcp.callTool({ name: 'handover_wait', arguments: { id: created.id, timeoutSeconds: 1 } })).status).toBe('pending');
+
+  const waiting = mcp.callTool({ name: 'handover_wait', arguments: { id: created.id, timeoutSeconds: 10 } });
+  store.claim(created.id, { by: 'codex@pc' });
+  store.complete(created.id, { output: 'here', files: [{ name: 'logo.svg', content: '<svg/>' }] });
+  expect(json(await waiting)).toMatchObject({ status: 'success', output: 'here', files: [{ name: 'logo.svg' }] });
   await mcp.close();
 });
