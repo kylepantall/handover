@@ -77,7 +77,7 @@ export interface AgentPresence {
   agent: string;
   version: string;
   platform: string;
-  /** What is running there: relay, claude-code, worker, listen, test. */
+  /** What is running there: relay, mcp, worker, listen, test. */
   via: string[];
   lastSeen: string;
 }
@@ -141,8 +141,20 @@ export interface Config {
   agent?: string;
   /** Host only: relay settings. */
   relay?: RelayConfig;
+  /** Take handovers automatically with a coding agent's CLI (off when absent). */
+  auto?: AutoPickup;
   /** @deprecated v0.4–0.6 peer mode; read as host. */
   peer?: boolean;
+}
+
+/** Coding agents handover knows how to wire up and run headless. */
+export const AGENT_KINDS = ['claude', 'codex'] as const;
+export type AgentKind = (typeof AGENT_KINDS)[number];
+
+export interface AutoPickup {
+  with: AgentKind;
+  /** Skip the agent's permission prompts and sandbox (opt-in only: tasks come from other machines). */
+  fullAccess?: boolean;
 }
 
 /** A host found on the network. */

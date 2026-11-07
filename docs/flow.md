@@ -9,11 +9,12 @@ One machine is the **host**: it runs the relay that holds the queue. Every other
 | Command | `handover host` | `handover join [HOST_URL]` |
 | Installer | `--host` / `-Host` | `--join [URL]` / `-Join [-Url URL]` |
 | Setup menu | "Host: other machines join this one" | "Join a host" |
-| Runs the relay | Yes: login service by default on macOS/Linux; on Windows inside Claude Code / `wait` / `worker` (service opt-in) | Never. Joining removes a relay service this install had set up |
+| Runs the relay | Yes: login service by default on macOS/Linux; on Windows inside handover's MCP server / `wait` / `worker` (service opt-in) | Never. Joining removes a relay service this install had set up |
 | Asks for | Nothing required (agent name; port and tunnel in the menu) | The **token** (hidden prompt or `HANDOVER_TOKEN`; never a command-line argument) |
 | Finds the other side | Announces itself on the LAN (`_handover._tcp`, role `host`, one-way network id from the token) | Finds the host by mDNS: no URL. Asks for a URL only if none is found (other network, blocked multicast) |
 | Prints | Token + join commands for macOS/Linux and Windows | "Joined <host> at <url>" |
-| Claude Code | MCP server + SessionStart hook (if the `claude` CLI is present; `--no-claude` skips) | Same |
+| Agents | MCP server in Claude Code (+ SessionStart hook) and Codex, for each CLI that's installed (`--no-claude` / `--no-codex` skip) | Same |
+| Auto-pickup | Asked in a terminal (default: the first agent found); `--auto claude\|codex\|off` in scripts; kept on rerun | Same |
 
 ## Commands
 
@@ -33,6 +34,16 @@ One machine is the **host**: it runs the relay that holds the queue. Every other
 | Presence | Every running handover process (host relay, Claude Code's MCP server, `worker`, `listen`) checks in with the host every 20 s; "online" means seen in the last 90 s |
 | Answering | Pings are system tasks addressed to one agent, answered by its running handover process, never shown to Claude, `list`, the hook or the worker. Unanswered pings are cancelled after 60 s |
 | A machine without Claude Code open | `handover listen` answers pings until stopped |
+
+## Auto-pickup
+
+| | |
+|---|---|
+| Runs | `claude -p --allowedTools mcp__handover` or `codex exec --skip-git-repo-check -`, briefing on stdin, in `<config>/work/<id>` |
+| Permissions | The agent's own settings. `--full-access` adds `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`, and doctor warns |
+| Where | The login service (`serve`) on macOS/Linux, on both roles. On Windows (no service by default) inside handover's MCP server while Claude Code or Codex is open. One worker per machine (`worker.lock` holds its pid); other processes check every 30 s and take over when it exits. Never inside an agent the worker started |
+| Result | The agent calls `handover_complete`; if it doesn't, its stdout is the output (exit 0 → success) |
+| Change it | `handover auto claude\|codex\|off [--full-access]`. On a client it installs or removes the login service; on a host it restarts a running one |
 
 ## Rules
 

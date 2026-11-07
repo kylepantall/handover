@@ -1,6 +1,6 @@
 {
   "name": "handover",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "MCP relay that hands tasks between LLM agents on different machines and returns the results to whoever is waiting.",
   "type": "module",

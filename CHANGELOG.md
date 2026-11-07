@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0
+
+- Codex support: `host` and `join` add handover's MCP server to Codex as well as Claude Code, for each CLI that's installed. `--no-codex` / `-NoCodex` skips it.
+- Auto-pickup: setup asks whether this machine takes handovers automatically, with Claude Code (`claude -p`) or Codex (`codex exec`). Each task runs unattended in its own folder with the agent's usual permissions. It runs at login on macOS/Linux and while Claude Code or Codex is open on Windows. Change it with `handover auto claude|codex|off`; installers take `--auto` / `-Auto`.
+- ⚠️ `--full-access` (opt-in only) skips the agent's permission prompts and sandbox; doctor warns while it's on.
+- `handover_watch` MCP tool: an open session waits for the next task and claims it.
+- `handover worker --with claude|codex` runs an agent without writing its command line.
+- `handover unlink` removes handover from Claude Code and Codex (`claude-unlink` still works). The uninstall scripts remove the Codex entry too.
+- `doctor` lists each agent's MCP status and auto-pickup.
+- ⚠️ A client may now have a login service: it runs auto-pickup only, never a relay. In a terminal, `join` always asks about auto-pickup, even with `HANDOVER_TOKEN` set.
+- README rewritten around a quick start, with a prompt that lets a coding agent set handover up.
+
 ## 0.8.0
 
 - `handover test`: checks the host answers, does a round trip through it, then a round robin where every online machine pings every other, giving the full grid of directed links with timings. Exits 1 if any link fails; `--json`.
