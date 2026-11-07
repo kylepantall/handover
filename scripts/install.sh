@@ -36,7 +36,10 @@ Installs $HANDOVER_REPO (branch, tag or commit; default main) under
                           the whole command), otherwise asked for. Finds the host on this
                           network; URL only if it's elsewhere
   --agent NAME            Agent name for this machine (default: hostname)
+  --auto claude|codex|off Take handovers automatically with that agent (asked in a terminal)
+  --full-access           Auto-pickup skips the agent's permission prompts and sandbox (risky)
   --no-claude             Don't add handover to Claude Code (added by default when installed)
+  --no-codex              Don't add handover to Codex (added by default when installed)
   --no-service            Host: don't start the relay at login (it runs while Claude Code is open)
   --no-setup              Install only; run "handover setup" later
 
@@ -47,7 +50,7 @@ EOF
 
 main() {
   local ref='main' run_setup=true mode='' join_url='' claude=false
-  local -a role_args=() host_args=()
+  local -a role_args=()
   while (($#)); do
     case "$1" in
       --help | -h) usage; return ;;
@@ -71,8 +74,12 @@ main() {
         shift
         ;;
       --claude) claude=true ;; # default now; kept for old links
-      --no-claude) role_args+=(--no-claude) ;;
-      --no-service) host_args+=(--no-service) ;;
+      --no-claude | --no-codex | --full-access | --no-service) role_args+=("$1") ;;
+      --auto)
+        [[ $# -ge 2 ]] || { printf '%s needs a value.\n' "$1" >&2; return 1; }
+        role_args+=(--auto "$2")
+        shift
+        ;;
       -*) printf 'Unknown option: %s\n' "$1" >&2; return 1 ;;
       *) ref="$1" ;;
     esac
@@ -216,14 +223,20 @@ main() {
   case "$mode" in
     host)
       step 'Host'
-      "$bin_dir/handover" host ${role_args[@]+"${role_args[@]}"} ${host_args[@]+"${host_args[@]}"}
+      # In a terminal, so it can ask about auto-pickup.
+      if [[ "$has_tty" == true ]]; then
+        "$bin_dir/handover" host ${role_args[@]+"${role_args[@]}"} <"$tty_dev"
+      else
+        "$bin_dir/handover" host ${role_args[@]+"${role_args[@]}"}
+      fi
       ;;
     join)
       step 'Join'
       local -a join_args=()
       [[ -z "$join_url" ]] || join_args+=("$join_url")
-      if [[ -z "${HANDOVER_TOKEN:-}" && "$has_tty" == true ]]; then
-        "$bin_dir/handover" join ${join_args[@]+"${join_args[@]}"} ${role_args[@]+"${role_args[@]}"} <"$tty_dev" # asks for the token
+      if [[ "$has_tty" == true ]]; then
+        # Asks for the token (unless HANDOVER_TOKEN is set) and about auto-pickup.
+        "$bin_dir/handover" join ${join_args[@]+"${join_args[@]}"} ${role_args[@]+"${role_args[@]}"} <"$tty_dev"
       else
         "$bin_dir/handover" join ${join_args[@]+"${join_args[@]}"} ${role_args[@]+"${role_args[@]}"}
       fi

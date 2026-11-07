@@ -2,7 +2,6 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { appRoot, compiled, isWindows, writePrivate } from './paths.ts';
-import { runProcess } from './process.ts';
 
 /** argv that runs this install's CLI with `sub` (the launcher when installed). */
 export function selfCommand(...sub: string[]): string[] {
@@ -21,24 +20,6 @@ const shellQuote = (s: string): string => {
   if (isWindows) return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `"${s.replace(/\\/g, '/')}"`;
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 };
-
-export async function claudeRegistration(): Promise<'registered' | 'missing' | 'no-claude'> {
-  const claude = Bun.which('claude');
-  if (!claude) return 'no-claude';
-  const result = await runProcess(claude, ['mcp', 'get', 'handover'], { timeoutMs: 20_000 }).catch(() => null);
-  return result?.code === 0 ? 'registered' : 'missing';
-}
-
-export async function registerWithClaude(): Promise<void> {
-  const claude = Bun.which('claude');
-  if (!claude) throw new Error('claude CLI not found.');
-  const result = await runProcess(
-    claude,
-    ['mcp', 'add', '--transport', 'stdio', '--scope', 'user', 'handover', '--', ...selfCommand('mcp')],
-    { timeoutMs: 30_000 }
-  );
-  if (result.code !== 0) throw new Error(`claude mcp add failed: ${result.stderr.trim() || result.stdout.trim()}`);
-}
 
 // --- SessionStart hook in ~/.claude/settings.json ---
 
@@ -108,17 +89,4 @@ export async function removeHook(file = claudeSettingsPath()): Promise<number> {
   if (!Object.keys(settings.hooks!).length) delete settings.hooks;
   await writePrivate(file, JSON.stringify(settings, null, 2) + '\n');
   return removed;
-}
-
-/** Removes the "handover" MCP server if it points at this install. */
-export async function unregisterFromClaude(): Promise<'removed' | 'not-registered' | 'other-install' | 'no-claude'> {
-  const claude = Bun.which('claude');
-  if (!claude) return 'no-claude';
-  const current = await runProcess(claude, ['mcp', 'get', 'handover'], { timeoutMs: 20_000 }).catch(() => null);
-  if (!current || current.code !== 0) return 'not-registered';
-  const [exe] = selfCommand();
-  if (!current.stdout.includes(exe!)) return 'other-install';
-  const result = await runProcess(claude, ['mcp', 'remove', 'handover', '--scope', 'user'], { timeoutMs: 30_000 });
-  if (result.code !== 0) throw new Error(`claude mcp remove failed: ${result.stderr.trim() || result.stdout.trim()}`);
-  return 'removed';
 }

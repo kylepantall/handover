@@ -1,6 +1,5 @@
 /** serve, wait, worker, hook, list, mcp. */
 
-import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { format } from 'node:util';
@@ -14,8 +13,9 @@ import { startResponder } from './responder.ts';
 import type { Paths } from './paths.ts';
 import { generateToken, lanAddresses, startTunnel } from './server.ts';
 import { isTerminal } from './store.ts';
-import { buildMcpServer, briefing } from './tools.ts';
-import { STATUS, TUNNELS, type Task, type TaskStatus, type Tunnel } from './types.ts';
+import { buildMcpServer } from './tools.ts';
+import { acquireWorkerLock, autoWork, WORKER_ENV, workLoop, type WorkOptions } from './worker.ts';
+import { STATUS, TUNNELS, type AgentKind, type Config, type Task, type TaskStatus, type Tunnel } from './types.ts';
 
 export const EXIT = { ok: 0, failed: 1, cancelled: 2, timeout: 3, usage: 64, interrupted: 130 } as const;
 const log = (msg: string, ctx?: Record<string, unknown>) => console.error('[handover]', msg, ...(ctx ? [ctx] : []));
@@ -55,8 +55,14 @@ export async function serve(p: Paths, o: ServeOptions): Promise<void> {
     teeConsole(o.log);
   }
   const config = await loadConfig(p);
-  if (roleOf(config) === 'client')
-    throw new Error('this machine is a client: it uses the host’s relay. Run handover host to make this machine the host.');
+  if (roleOf(config) === 'client') {
+    // A client's service only takes handovers; it never runs a relay.
+    if (startAuto(p, config, 'service')) return;
+    throw new Error(
+      'this machine is a client: it uses the host’s relay. Turn on auto-pickup (handover auto claude|codex), or run handover host to make this machine the host.'
+    );
+  }
+  startAuto(p, config, 'service');
   const relay = config.relay ?? {};
   const port = o.port ?? relay.port ?? DEFAULT_PORT;
   let token = o.token ?? process.env.HANDOVER_TOKEN ?? config.token;
@@ -200,22 +206,11 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
   return task.status === STATUS.FAILED ? EXIT.failed : EXIT.cancelled;
 }
 
-function runAgent(command: string, task: Task): Promise<{ code: number; stdout: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(command, { shell: true, stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, HANDOVER_ID: task.id } });
-    let stdout = '';
-    child.stdout!.on('data', (d: Buffer) => {
-      stdout += d;
-      process.stderr.write(d);
-    });
-    child.stdin!.end(briefing(task));
-    child.on('close', (code) => resolve({ code: code ?? 1, stdout }));
-    child.on('error', (err) => resolve({ code: -1, stdout: err.message }));
-  });
-}
-
 export interface WorkerOptions {
   exec?: string;
+  /** Run this coding agent's CLI (default: the auto-pickup agent from setup). */
+  with?: AgentKind;
+  fullAccess?: boolean;
   agent?: string;
   leaseSeconds?: number;
   intervalSeconds?: number;
@@ -223,40 +218,65 @@ export interface WorkerOptions {
 }
 
 export async function worker(p: Paths, o: WorkerOptions): Promise<number> {
-  if (!o.exec) {
-    console.error('worker needs --exec "<agent command>"');
+  const config = await loadConfig(p);
+  const kind = o.with ?? (o.exec ? undefined : config.auto?.with);
+  if (!o.exec && !kind) {
+    console.error('worker needs --with claude|codex or --exec "<agent command>"');
     return EXIT.usage;
   }
-  keepLocalRelay(p, await loadConfig(p));
+  keepLocalRelay(p, config);
   const { api, agent: configured, label } = await client(p);
   const agent = o.agent ?? configured;
-  startResponder(api, { agent, via: 'worker' });
-  const leaseMs = o.leaseSeconds ? o.leaseSeconds * 1000 : undefined;
-  log('worker polling', { agent, relay: label });
-  for (;;) {
-    try {
-      let task: Task | null;
-      while ((task = await api.claimNext({ by: agent, leaseMs }))) {
-        const t = task;
-        log('picked up', { id: t.id, priority: t.priority, attempt: t.attempts });
-        // Keep the lease alive while the agent runs: renew at a third of its length.
-        const leaseLeft = Date.parse(t.leaseExpiresAt ?? '') - Date.now();
-        const renewer = setInterval(() => {
-          api.renew(t.id, { by: agent, leaseMs }).catch((err: Error) => log('renew failed', { id: t.id, error: err.message }));
-        }, Math.max(1000, leaseLeft / 3));
-        const { code, stdout } = await runAgent(o.exec, t).finally(() => clearInterval(renewer));
-        if (!isTerminal((await api.get(t.id)).status)) {
-          // Agent didn't call handover_complete itself: hand back its stdout.
-          await api.complete(t.id, { status: code === 0 ? STATUS.SUCCESS : STATUS.FAILED, output: stdout.trim() });
-        }
-        log('finished', { id: t.id, exitCode: code });
-      }
-    } catch (err) {
-      log('poll failed', { error: (err as Error).message });
+  let work: WorkOptions | null;
+  if (o.exec) work = { agent, command: o.exec };
+  else {
+    work = autoWork(p, { with: kind!, fullAccess: o.fullAccess ?? (o.with ? false : config.auto?.fullAccess) }, agent, 'worker');
+    if (!work) {
+      console.error(`worker: the ${kind} CLI isn't installed`);
+      return EXIT.failed;
     }
-    if (o.once) return EXIT.ok;
-    await Bun.sleep((o.intervalSeconds ?? 3) * 1000);
   }
+  // Hold the machine's worker lock if it's free, so the MCP server of an agent
+  // this worker starts doesn't start a second worker.
+  acquireWorkerLock(p);
+  log('worker polling', { agent, relay: label, with: kind ?? 'exec' });
+  await workLoop(api, { ...work, leaseMs: o.leaseSeconds ? o.leaseSeconds * 1000 : undefined, intervalMs: (o.intervalSeconds ?? 3) * 1000, once: o.once });
+  return EXIT.ok;
+}
+
+/**
+ * Auto-pickup inside a long-running process (the login service or the MCP
+ * server), in the background. Only one process per machine works at a time
+ * (acquireWorkerLock); the others check every 30 s and take over when it goes.
+ * Waits, rather than failing, while the agent's CLI is missing. Returns false
+ * when auto-pickup is off, or inside an agent the worker started.
+ */
+export function startAuto(p: Paths, config: Config, via: string): boolean {
+  const auto = config.auto;
+  if (!auto || process.env[WORKER_ENV]) return false;
+  void (async () => {
+    let reported = '';
+    const report = (state: string, ctx: Record<string, unknown>) => {
+      if (state !== reported) log(state, ctx);
+      reported = state;
+    };
+    for (;;) {
+      try {
+        const { api, agent } = await connect(p, config);
+        const work = autoWork(p, auto, agent, via);
+        if (!work) report('auto-pickup waiting: agent CLI not installed', { with: auto.with });
+        else if (acquireWorkerLock(p)) {
+          log('auto-pickup on', { agent, with: auto.with, fullAccess: auto.fullAccess === true, via });
+          await workLoop(api, work);
+          return;
+        } else report('auto-pickup: another handover process is the worker', { via });
+      } catch (err) {
+        report('auto-pickup failed to start', { error: (err as Error).message });
+      }
+      await Bun.sleep(30_000);
+    }
+  })();
+  return true;
 }
 
 /** Claude Code SessionStart hook. Never fails the session. */
@@ -286,7 +306,9 @@ export async function mcp(p: Paths): Promise<void> {
   // Claude Code keeps this process alive while it's open, which makes it a natural
   // host for this machine's relay: no login service needed.
   keepLocalRelay(p, config);
-  startResponder(api, { agent, via: 'claude-code' });
+  startResponder(api, { agent, via: 'mcp' });
+  // Auto-pickup while an agent is open (unless another process already does it).
+  startAuto(p, config, 'mcp');
   // A hosted relay would keep the process alive after Claude Code closes our stdin.
   process.stdin.once('end', async () => {
     await stopHosting();

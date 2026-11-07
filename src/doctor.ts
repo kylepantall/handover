@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs';
-import { claudeRegistration, hookInstalled } from './claude.ts';
+import { ADAPTERS, autoSummary } from './agents.ts';
+import { hookInstalled } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, endpoint, loadConfig, roleOf } from './config.ts';
 import { hostUrl } from './connect.ts';
 import type { Paths } from './paths.ts';
 import { serviceIsOurs, serviceState } from './service.ts';
-import type { Config } from './types.ts';
+import { AGENT_KINDS, type Config } from './types.ts';
 import { compareVersions, latestVersion, resolveRef } from './update.ts';
 import { VERSION } from './version.ts';
 
@@ -66,8 +67,8 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
     else if (state === 'unauthorized') add('host', 'fail', `${url} rejected the token`, 'handover join (with the token from handover link on the host)');
     else
       add('host', 'fail', `${url} not answering`, 'Is the host on? A Windows host runs its relay while Claude Code is open there; handover doctor on the host');
-    if (['running', 'stopped'].includes(await serviceState()) && (await serviceIsOurs()))
-      add('service', 'warn', 'this client still has a relay login service', 'handover service uninstall');
+    if (!config.auto && ['running', 'stopped'].includes(await serviceState()) && (await serviceIsOurs()))
+      add('service', 'warn', 'this client has a login service but auto-pickup is off', 'handover service uninstall');
   }
 
   if (role === 'host') {
@@ -83,17 +84,30 @@ export async function runChecks(p: Paths, { offline = false } = {}): Promise<Che
       add('tunnel', 'fail', `${config.relay.tunnel} not installed`, config.relay.tunnel === 'tailscale' ? 'brew install tailscale' : 'brew install cloudflared');
   }
 
-  const claude = await claudeRegistration();
-  if (claude === 'registered') add('claude code', 'ok', 'handover MCP server registered');
-  else if (claude === 'missing') add('claude code', 'warn', 'MCP server not registered', 'handover setup');
-  else add('claude code', 'info', 'claude CLI not found');
-  if (claude !== 'no-claude') {
-    try {
-      if (await hookInstalled()) add('claude hook', 'ok', 'pending handovers shown at session start');
-      else add('claude hook', 'info', 'SessionStart hook not installed', 'handover setup');
-    } catch (err) {
-      add('claude hook', 'warn', (err as Error).message);
+  for (const kind of AGENT_KINDS) {
+    const a = ADAPTERS[kind];
+    const area = a.label.toLowerCase();
+    const state = await a.mcpState();
+    if (state === 'registered') add(area, 'ok', 'handover MCP server registered');
+    else if (state === 'missing') add(area, 'warn', 'MCP server not registered', role === 'host' ? 'handover host' : 'handover join');
+    else add(area, 'info', `${kind} CLI not found`);
+    if (kind === 'claude' && state !== 'not-installed') {
+      try {
+        if (await hookInstalled()) add('claude hook', 'ok', 'pending handovers shown at session start');
+        else add('claude hook', 'info', 'SessionStart hook not installed', 'handover setup');
+      } catch (err) {
+        add('claude hook', 'warn', (err as Error).message);
+      }
     }
+  }
+
+  if (role) {
+    const auto = config.auto;
+    const svc = await serviceState();
+    const atLogin = svc === 'running' && (await serviceIsOurs());
+    if (!auto) add('auto-pickup', 'info', 'off: tasks wait until you ask an agent', 'handover auto claude|codex');
+    else if (!ADAPTERS[auto.with]?.bin()) add('auto-pickup', 'fail', `${auto.with} CLI not found`, 'install it, or handover auto off');
+    else add('auto-pickup', auto.fullAccess ? 'warn' : 'ok', autoSummary(auto, atLogin), auto.fullAccess ? 'handover auto ' + auto.with : undefined);
   }
   return checks;
 }

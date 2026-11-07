@@ -40,7 +40,7 @@ function Uninstall-Handover {
     else { Bad "could not remove '$Task': $out (delete it in Task Scheduler; if that is refused too, check your antivirus)" }
   }
 
-  Write-Host 'Claude Code'
+  Write-Host 'Claude Code and Codex'
   # handover.exe edits settings.json itself: PowerShell 5.1's JSON round-trip can mangle it.
   if (Test-Path $exe) {
     $out = (& $exe claude-unlink 2>&1 | ForEach-Object { "$_" })

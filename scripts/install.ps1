@@ -16,6 +16,9 @@ param(
   [string]$Url,
   [string]$Agent,
   [switch]$NoClaude,
+  [switch]$NoCodex,
+  [ValidateSet('claude', 'codex', 'off')][string]$Auto,
+  [switch]$FullAccess,
   [switch]$NoSetup,
   [switch]$Help,
   # Old flags (docs/flow.md, Compatibility).
@@ -35,13 +38,15 @@ function Write-Info([string]$Text) { Write-Host "    $Text" }
 function Install-Handover {
   $repo = if ($env:HANDOVER_REPO) { $env:HANDOVER_REPO } else { 'kylepantall/handover' }
   if ($Help) {
-    Write-Host 'Usage: install.ps1 [-Host | -Join [-Url URL]] [-Agent NAME] [-NoClaude] [-NoSetup] [-Version x.y.z]'
+    Write-Host 'Usage: install.ps1 [-Host | -Join [-Url URL]] [-Agent NAME] [-Auto claude|codex|off] [-FullAccess] [-NoClaude] [-NoCodex] [-NoSetup] [-Version x.y.z]'
     Write-Host "Installs a $repo release (default latest) under %LOCALAPPDATA%\handover\app and adds it to your user PATH."
     Write-Host '  -Host               Make this machine the host: prints the token and join commands'
     Write-Host '  -Join               Join a host: token from $env:HANDOVER_TOKEN (handover link on the host prints the'
     Write-Host '                      whole command) or asked for; finds the host on this network'
     Write-Host '  -Url URL            The host''s address, only if it is on another network'
-    Write-Host '  -NoClaude           Don''t add handover to Claude Code (added by default when installed)'
+    Write-Host '  -Auto AGENT         Take handovers automatically with claude or codex (asked in a terminal)'
+    Write-Host '  -FullAccess         Auto-pickup skips the agent''s permission prompts and sandbox (risky)'
+    Write-Host '  -NoClaude/-NoCodex  Don''t add handover to Claude Code / Codex (added by default when installed)'
     Write-Host 'No option: a menu asks host or join.'
     return
   }
@@ -150,6 +155,9 @@ function Install-Handover {
     $roleArgs = @()
     if ($Agent) { $roleArgs += @('--agent', $Agent) }
     if ($NoClaude) { $roleArgs += '--no-claude' }
+    if ($NoCodex) { $roleArgs += '--no-codex' }
+    if ($Auto) { $roleArgs += @('--auto', $Auto) }
+    if ($FullAccess) { $roleArgs += '--full-access' }
 
     # Not $home: that's PowerShell's read-only automatic variable.
     $dataDir = if ($env:HANDOVER_HOME) { $env:HANDOVER_HOME } else { Join-Path $env:APPDATA 'handover' }

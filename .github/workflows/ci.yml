@@ -27,7 +27,7 @@ jobs:
           bash -n scripts/install.sh
           HANDOVER_SOURCE_DIR="$PWD" bash scripts/install.sh --no-setup
           ~/.local/bin/handover --version
-          HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover host --agent ci --no-service --no-claude
+          HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover host --agent ci --no-service --no-claude --no-codex
           HANDOVER_HOME="$RUNNER_TEMP/h" ~/.local/bin/handover link
       - name: Uninstall
         if: runner.os != 'Windows'

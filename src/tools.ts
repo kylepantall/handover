@@ -9,10 +9,10 @@ const text = (value: unknown): ToolResult => ({
   content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
 });
 const safe =
-  <A>(fn: (args: A) => Promise<ToolResult>) =>
-  async (args: A): Promise<ToolResult> => {
+  <A>(fn: (args: A, extra?: { signal?: AbortSignal }) => Promise<ToolResult>) =>
+  async (args: A, extra?: { signal?: AbortSignal }): Promise<ToolResult> => {
     try {
-      return await fn(args);
+      return await fn(args, extra);
     } catch (err) {
       return { isError: true, content: [{ type: 'text', text: `Error: ${(err as Error).message}` }] };
     }
@@ -79,6 +79,29 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client' }: { agentNa
     safe(async ({ leaseSeconds: s }) => {
       const task = await api.claimNext({ by: agentName, leaseMs: toMs(s) });
       return text(task ? briefing(task) : 'Queue is empty.');
+    })
+  );
+
+  server.registerTool(
+    'handover_watch',
+    {
+      title: 'Wait for the next handover',
+      description:
+        'Wait for a handover addressed to you (or anyone) to arrive, claim it and return its briefing. Returns "No handover yet." after timeoutSeconds: call again to keep watching. Use it when the user asks you to watch for or keep taking handovers.',
+      inputSchema: {
+        // Codex gives an MCP tool call 60 s by default.
+        timeoutSeconds: z.number().int().positive().max(600).optional().describe('How long to wait (default 50)'),
+        leaseSeconds,
+      },
+    },
+    safe(async ({ timeoutSeconds = 50, leaseSeconds: s }, extra?: { signal?: AbortSignal }) => {
+      const end = Date.now() + timeoutSeconds * 1000;
+      for (;;) {
+        const task = await api.claimNext({ by: agentName, leaseMs: toMs(s) });
+        if (task) return text(briefing(task));
+        if (Date.now() >= end || extra?.signal?.aborted) return text('No handover yet.');
+        await Bun.sleep(Math.min(1000, end - Date.now()));
+      }
     })
   );
 

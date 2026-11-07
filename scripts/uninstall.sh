@@ -92,6 +92,22 @@ else
   fi
 fi
 
+printf 'Codex\n'
+if ! command -v codex >/dev/null 2>&1; then
+  skip 'codex CLI not found'
+else
+  registered="$(codex mcp get handover 2>/dev/null)"
+  if [[ -z "$registered" ]]; then
+    skip 'MCP server not registered'
+  elif [[ "$registered" != *"$launcher"* ]]; then
+    skip 'MCP server "handover" points at another install; left alone'
+  elif codex mcp remove handover >/dev/null 2>&1; then
+    ok 'removed MCP server "handover"'
+  else
+    bad 'could not remove the MCP server: codex mcp remove handover'
+  fi
+fi
+
 # The SessionStart hook lives in settings.json; edit it with whatever JavaScript
 # runtime is around (handover's private Bun, bun, or node).
 settings="$claude_dir/settings.json"

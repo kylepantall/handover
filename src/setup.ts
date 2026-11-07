@@ -10,7 +10,8 @@
 
 import * as ui from '@clack/prompts';
 import { existsSync } from 'node:fs';
-import { claudeRegistration, installHook, registerWithClaude } from './claude.ts';
+import { ADAPTERS, describeAuto, installedAgents } from './agents.ts';
+import { installHook } from './claude.ts';
 import { probe } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
 import { connect } from './connect.ts';
@@ -22,7 +23,7 @@ import type { Paths } from './paths.ts';
 import { generateToken } from './server.ts';
 import { installService, serviceByDefault, serviceIsOurs, serviceState, serviceSupported, uninstallService } from './service.ts';
 import { validateAgent } from './store.ts';
-import { TUNNELS, type Config, type Tunnel } from './types.ts';
+import { TUNNELS, type AgentKind, type AutoPickup, type Config, type Tunnel } from './types.ts';
 
 type Say = (message: string) => void;
 
@@ -61,33 +62,139 @@ async function waitForRelay(url: string, token: string, ms = 8000): Promise<bool
   return false;
 }
 
-/** MCP server + SessionStart hook, when the claude CLI is present (unless `claude` is false). */
-async function wireClaude(claude: boolean | undefined, say: Say): Promise<void> {
-  if (claude === false) return;
-  const state = await claudeRegistration();
-  if (state === 'no-claude') return;
-  if (state === 'registered') say('Claude Code: MCP server already registered');
-  else {
-    await registerWithClaude();
-    say('Claude Code: added the "handover" MCP server (start a new session to load it)');
+/** Which coding agents to wire up and whether one takes handovers automatically. */
+export interface AgentOptions {
+  /** false: leave Claude Code alone. */
+  claude?: boolean;
+  /** false: leave Codex alone. */
+  codex?: boolean;
+  /** Auto-pickup agent, or 'off'. Unset: ask in a terminal, else keep the current choice. */
+  auto?: AgentKind | 'off';
+  /** Auto-pickup without the agent's permission prompts or sandbox. */
+  fullAccess?: boolean;
+  /** Login service: default on macOS/Linux, off on Windows (docs/flow.md). */
+  service?: boolean;
+}
+
+const skipped = (o: AgentOptions, kind: AgentKind) => o[kind] === false;
+
+/** Registers handover's MCP server with every installed agent (and Claude Code's SessionStart hook). */
+async function wireAgents(o: AgentOptions, say: Say): Promise<void> {
+  for (const a of installedAgents()) {
+    if (skipped(o, a.kind)) continue;
+    try {
+      if ((await a.mcpState()) === 'registered') say(`${a.label}: MCP server already registered`);
+      else {
+        await a.register();
+        say(`${a.label}: added the "handover" MCP server (start a new session to load it)`);
+      }
+      if (a.kind === 'claude' && (await installHook()) === 'added') say('Claude Code: pending handovers now show at session start');
+    } catch (err) {
+      say(`${a.label}: could not add the MCP server (${(err as Error).message}); see handover doctor`);
+    }
   }
-  if ((await installHook()) === 'added') say('Claude Code: pending handovers now show at session start');
+}
+
+/** The auto-pickup setting after setup: from the flags, a prompt, or the current config. */
+async function chooseAuto(existing: Config, o: AgentOptions, ask: boolean): Promise<AutoPickup | undefined> {
+  const pick = (kind: AgentKind, keptFullAccess?: boolean): AutoPickup => ({
+    with: kind,
+    ...((o.fullAccess ?? keptFullAccess) ? { fullAccess: true } : {}),
+  });
+  if (o.auto === 'off') return undefined;
+  if (o.auto) {
+    if (skipped(o, o.auto)) throw new Error(`--auto ${o.auto} needs handover added to ${o.auto}: drop --no-${o.auto}`);
+    if (!ADAPTERS[o.auto].bin()) throw new Error(`--auto ${o.auto}: the ${o.auto} CLI isn't installed here`);
+    return pick(o.auto);
+  }
+  const agents = installedAgents().filter((a) => !skipped(o, a.kind));
+  if (ask && agents.length) {
+    const choice = cancelled(
+      await ui.select<AgentKind | 'off'>({
+        message: 'Take handovers automatically on this machine?',
+        initialValue: existing.auto?.with ?? agents[0]!.kind,
+        options: [
+          ...agents.map((a) => ({ value: a.kind, label: `Yes, with ${a.label}`, hint: 'runs each task unattended, with your usual permission settings' })),
+          { value: 'off' as const, label: 'No', hint: 'tasks wait until you ask an agent to pick them up' },
+        ],
+      })
+    );
+    if (choice === 'off') return undefined;
+    return pick(choice, existing.auto?.with === choice ? existing.auto.fullAccess : undefined);
+  }
+  return existing.auto ? pick(existing.auto.with, existing.auto.fullAccess) : undefined;
+}
+
+/**
+ * A client's login service exists only for auto-pickup: installs it when
+ * auto-pickup is on (and the service is wanted), removes ours otherwise.
+ * Returns whether auto-pickup runs at login.
+ */
+async function clientService(existing: Config, config: Config, o: AgentOptions, say: Say): Promise<boolean> {
+  const ours = await serviceIsOurs();
+  if (['running', 'stopped'].includes(await serviceState()) && !ours) {
+    if (config.auto) say('A login service from another handover install exists; left alone');
+    return false;
+  }
+  const kept = roleOf(existing) === 'client' && ours;
+  if (config.auto && serviceSupported() && (o.service ?? (serviceByDefault() || kept))) {
+    try {
+      await installService();
+      return true;
+    } catch (err) {
+      say(`Could not install the login service (${(err as Error).message})`);
+      return false;
+    }
+  }
+  if (ours) {
+    await uninstallService().catch(() => {});
+    say(roleOf(existing) === 'host' ? 'Removed this machine’s relay service (clients use the host’s relay)' : 'Removed the auto-pickup login service');
+  }
+  return false;
+}
+
+/** `handover auto [claude|codex|off]`: shows or changes auto-pickup. */
+export async function runAuto(p: Paths, o: AgentOptions): Promise<number> {
+  const existing = await loadConfig(p);
+  const role = roleOf(existing);
+  if (!role) throw new Error('not set up yet: handover host or handover join');
+  const say: Say = (m) => console.log(m);
+  if (o.auto === undefined && o.fullAccess === undefined) {
+    const state = await serviceState();
+    say(describeAuto(existing.auto, state === 'running' && (await serviceIsOurs())));
+    return 0;
+  }
+  const auto = await chooseAuto(existing, o, false);
+  const config: Config = { ...existing };
+  if (auto) config.auto = auto;
+  else delete config.auto;
+  await saveConfig(p, config);
+  let atLogin = false;
+  if (role === 'client') atLogin = await clientService(existing, config, o, say);
+  else if ((await serviceState()) === 'running' && (await serviceIsOurs())) {
+    await installService(); // restart, so the relay service picks it up
+    atLogin = true;
+  }
+  say(describeAuto(config.auto, atLogin));
+  if (!atLogin && config.auto) say('Start a new Claude Code or Codex session to apply it.');
+  return 0;
 }
 
 // ── host ────────────────────────────────────────────────────────────────
 
-export interface HostOptions {
+export interface HostOptions extends AgentOptions {
   port?: number;
   tunnel?: Tunnel;
   agent?: string;
-  /** Login service: default on macOS/Linux, off on Windows (docs/flow.md). */
-  service?: boolean;
-  claude?: boolean;
+  /** Ask about auto-pickup (a terminal). */
+  ask?: boolean;
 }
 
 /** Makes this machine the host and returns its config (printing the link is up to the caller). */
 export async function becomeHost(p: Paths, o: HostOptions, say: Say): Promise<Config> {
   const existing = await loadConfig(p);
+  await wireAgents(o, say);
+  const auto = await chooseAuto(existing, o, o.ask === true);
   const wasHost = roleOf(existing) === 'host';
   const port = o.port ?? existing.relay?.port ?? DEFAULT_PORT;
   const config: Config = {
@@ -97,6 +204,7 @@ export async function becomeHost(p: Paths, o: HostOptions, say: Say): Promise<Co
     token: process.env.HANDOVER_TOKEN || (wasHost ? existing.token : undefined) || generateToken(),
     url: `http://127.0.0.1:${port}`,
     relay: { ...(wasHost ? existing.relay : {}), port, ...(o.tunnel ? { tunnel: o.tunnel } : {}) },
+    ...(auto ? { auto } : {}),
   };
   validateAgent(config.agent, 'agent name');
   await saveConfig(p, config);
@@ -104,38 +212,39 @@ export async function becomeHost(p: Paths, o: HostOptions, say: Say): Promise<Co
 
   const existingService = await serviceState();
   const foreignService = ['running', 'stopped'].includes(existingService) && !(await serviceIsOurs());
+  let atLogin = false;
   if (foreignService) {
     say('A login service from another handover install exists; left alone');
   } else if (o.service ?? serviceByDefault()) {
     try {
       await installService();
+      atLogin = true;
       say((await waitForRelay(config.url!, config.token!)) ? 'Relay running; it starts at login' : 'Relay service installed but not answering yet (handover doctor)');
     } catch (err) {
-      // Not fatal: the relay also runs inside Claude Code's MCP server, wait and worker.
-      say(`Could not install the login service (${(err as Error).message}); the relay runs while Claude Code or a handover command is open`);
+      // Not fatal: the relay also runs inside handover's MCP server, wait and worker.
+      say(`Could not install the login service (${(err as Error).message}); the relay runs while Claude Code, Codex or a handover command is open`);
     }
   } else {
-    say('The relay runs while Claude Code or a handover command is open (handover service install keeps it running)');
+    say('The relay runs while Claude Code, Codex or a handover command is open (handover service install keeps it running)');
   }
-  await wireClaude(o.claude, say);
+  say(describeAuto(config.auto, atLogin));
   return config;
 }
 
 export async function runHost(p: Paths, o: HostOptions): Promise<number> {
-  const config = await becomeHost(p, o, (m) => console.log(m));
+  const config = await becomeHost(p, { ...o, ask: o.ask ?? process.stdin.isTTY === true }, (m) => console.log(m));
   console.log(`\n${formatLink(linkInfo(config))}`);
   return 0;
 }
 
 // ── join ────────────────────────────────────────────────────────────────
 
-export interface JoinOptions {
+export interface JoinOptions extends AgentOptions {
   /** Host URL; omit to find the host on this network. */
   url?: string;
   /** Normally from a prompt or HANDOVER_TOKEN (never argv); kept for old installer flags. */
   token?: string;
   agent?: string;
-  claude?: boolean;
   /** Prompt for missing answers (a terminal) instead of failing. */
   interactive?: boolean;
 }
@@ -180,22 +289,21 @@ export async function becomeClient(p: Paths, o: JoinOptions, say: Say): Promise<
   // A Windows host runs its relay only while Claude Code or handover is open there.
   if (state === 'unreachable') say(`Warning: the host at ${url} isn't answering right now; saved anyway`);
 
-  const config: Config = { role: 'client', url, discover: discovered, token, agent: o.agent ?? agentName(existing) };
+  await wireAgents(o, say);
+  const auto = await chooseAuto(existing, o, o.interactive === true);
+  const config: Config = { role: 'client', url, discover: discovered, token, agent: o.agent ?? agentName(existing), ...(auto ? { auto } : {}) };
   validateAgent(config.agent, 'agent name');
   await saveConfig(p, config);
   say(`Saved ${p.config}`);
 
-  // A client never runs a relay: remove one this install set up as a host.
-  if (roleOf(existing) === 'host' && (await serviceIsOurs())) {
-    await uninstallService().catch(() => {});
-    say('Removed this machine’s relay service (clients use the host’s relay)');
-  }
-  await wireClaude(o.claude, say);
+  // A client never runs a relay; its service (if any) only takes handovers.
+  say(describeAuto(config.auto, await clientService(existing, config, o, say)));
   return config;
 }
 
 export async function runJoin(p: Paths, o: Omit<JoinOptions, 'interactive'>): Promise<number> {
-  const interactive = process.stdin.isTTY === true && !(o.token || process.env.HANDOVER_TOKEN);
+  // A terminal: ask for what's missing (the token, and whether to take handovers automatically).
+  const interactive = process.stdin.isTTY === true;
   if (interactive) ui.intro('handover join');
   const say: Say = interactive ? (m) => ui.log.success(m) : (m) => console.log(m);
   const config = await becomeClient(p, { ...o, interactive }, say);
@@ -248,9 +356,9 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
     return runHost(p, { port: opts.port, tunnel: opts.tunnel, agent: opts.agent, service: opts.service, claude: opts.claude || undefined });
   if (opts.join || opts.peer) return runJoin(p, { url: opts.join, token: opts.token, agent: opts.agent, claude: opts.claude || undefined });
 
-  // Only Claude Code wiring requested on an existing setup (installer --claude).
+  // Only agent wiring requested on an existing setup (installer --claude).
   if ((opts.claude || opts.hook) && existsSync(p.config)) {
-    await wireClaude(true, (m) => console.log(m));
+    await wireAgents({}, (m) => console.log(m));
     return 0;
   }
 
@@ -312,7 +420,7 @@ export async function runSetup(p: Paths, opts: SetupOptions): Promise<number> {
       )
     : false;
 
-  const config = await becomeHost(p, { agent, port, tunnel: tunnel === 'none' ? undefined : tunnel, service }, step);
+  const config = await becomeHost(p, { agent, port, tunnel: tunnel === 'none' ? undefined : tunnel, service, ask: true }, step);
   ui.note(formatLink(linkInfo(config)), 'Share with the machines that should join');
   ui.note(formatChecks(await runChecks(p, { offline: true })), 'handover doctor');
   ui.outro('This machine is the host.');
