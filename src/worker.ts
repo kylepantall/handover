@@ -24,7 +24,10 @@ export const WORKER_ENV = 'HANDOVER_WORKER';
 export type AgentCommand = string | string[];
 
 const UNATTENDED =
-  '\n\nYou are running unattended: nobody can answer questions. If the handover tools are unavailable, end with your final answer; it is sent back as the output.';
+  '\n\nYou are running unattended: nobody can answer questions. If the handover tools are unavailable, end with your final answer; it is sent back as the output. If you could not do the task, start that final answer with "FAILED:".';
+
+/** The agent said it couldn't do the task (see UNATTENDED), even if it exited 0. */
+export const reportsFailure = (output: string): boolean => /^\s*FAILED:/.test(output);
 
 const quoteCmd = (a: string) => (/^[\w./:=@-]+$/.test(a) ? a : `"${a}"`);
 
@@ -99,7 +102,8 @@ async function runOne(api: Api, t: Task, o: WorkOptions): Promise<void> {
   const { code, stdout } = await runAgent(o.command, t, cwd).finally(() => clearInterval(renewer));
   if (!isTerminal((await api.get(t.id)).status)) {
     // The agent didn't call handover_complete itself: hand back its stdout.
-    await api.complete(t.id, { status: code === 0 ? STATUS.SUCCESS : STATUS.FAILED, output: stdout.trim() });
+    const failed = code !== 0 || reportsFailure(stdout);
+    await api.complete(t.id, { status: failed ? STATUS.FAILED : STATUS.SUCCESS, output: stdout.trim() });
   }
   log('finished', { id: t.id, exitCode: code });
 }

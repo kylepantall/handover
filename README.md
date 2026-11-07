@@ -92,11 +92,28 @@ Every agent has its own address: `claude@pc`, `codex@pc`. Send a task to whoever
 
 | Setup | What happens |
 |---|---|
-| Auto-pickup on (the setup question, or `handover auto claude\|codex\|both`) | Each task runs unattended with `claude -p` or `codex exec`, in its own folder. With both, each agent has its own worker, so they run at the same time. macOS/Linux: runs at login. Windows: runs while Claude Code or Codex is open |
+| Auto-pickup on (the setup question, or `handover agents all on`) | Each task runs unattended with `claude -p` or `codex exec`, in its own folder. With both, each agent has its own worker, so they run at the same time. macOS/Linux: runs at login. Windows: runs while Claude Code or Codex is open |
 | Auto-pickup off | Claude Code shows pending tasks when a session starts. Ask any agent to "pick up the handover", or to "watch for handovers" (`handover_watch`) |
 | Other MCP clients | See [Connect other agents](#connect-other-agents) |
 
-⚠️ Tasks come from other machines, so treat them as untrusted input. Auto-pickup keeps each agent's own permission settings: Claude Code may only use handover's tools without asking, and Codex keeps its sandbox. `--full-access` removes those limits; only use it on a machine you'd trust anyone on the network with.
+### Per-agent settings
+
+```bash
+handover agents                     # list: installed, MCP, auto-pickup, access
+handover agents all on              # every agent takes handovers automatically
+handover agents codex off           # just Codex stops
+handover agents codex full-access   # ⚠️ just Codex: no permission prompts or sandbox
+handover agents all default-access
+```
+
+| Access | Claude Code | Codex |
+|---|---|---|
+| default | Your permission settings; handover's own tools allowed | Writes only in the task's own folder, no network; handover's own tools allowed |
+| ⚠️ full-access | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` |
+
+⚠️ Tasks come from other machines, so treat them as untrusted input. Only give an agent full access on a machine you'd trust anyone on the network with. With default access, an agent can make files and send them back, but it can't change your repos or open PRs: have an open session do that part (see the example above).
+
+If an agent can't finish, it answers `FAILED: …`, and the task is marked failed.
 
 ## Commands
 
@@ -104,7 +121,7 @@ Every agent has its own address: `claude@pc`, `codex@pc`. Send a task to whoever
 |---|---|
 | `handover host` | Make this machine the host; prints the join commands |
 | `handover join [HOST_URL]` | Join a host (asks for the token). The URL is only needed if the host is on another network |
-| `handover auto [claude\|codex\|both\|off]` | Show or change auto-pickup (`--full-access` ⚠️ skips permission prompts and sandbox) |
+| `handover agents [WHO SETTING…]` | List agents, or change them: `all on`, `codex off`, `codex full-access`, `all default-access` |
 | `handover test` | Check every machine reaches every other. Exits 1 if any link fails |
 | `handover doctor` | Check the host, the login service, Claude Code, Codex and auto-pickup |
 | `handover wait --objective "…"` | Create a task and block until it's done |

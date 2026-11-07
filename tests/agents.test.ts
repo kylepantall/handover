@@ -43,7 +43,11 @@ if [ "$1" = mcp ]; then
   esac
 fi
 echo "$*" >> "$FAKE_STATE/$name.runs"
-head -n 1 | sed "s/^/done by $name: /"
+input="$(cat)"
+case "$input" in
+  *"please fail"*) echo "FAILED: could not" ;;
+  *) printf '%s\n' "$input" | head -n 1 | sed "s/^/done by $name: /" ;;
+esac
 `;
 
 beforeEach(async () => {
@@ -104,7 +108,7 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     const { url } = await host();
     const { code } = await join(url, '--auto', 'codex');
     expect(code).toBe(0);
-    expect((await loadConfig(paths(path.join(dir, 'home')))).auto).toEqual({ with: ['codex'] });
+    expect((await loadConfig(paths(path.join(dir, 'home')))).agents).toEqual({ codex: { auto: true } });
     for (const name of ['claude', 'codex']) expect(await read(`${name}.mcp`)).toContain(`${CLI} mcp --as ${name}`);
     expect(existsSync(path.join(dir, 'claude', 'settings.json'))).toBe(true); // Claude Code's SessionStart hook
   });
@@ -119,7 +123,7 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
   test('auto-pickup with both: tasks for codex go to Codex, for claude to Claude, for the machine to either', async () => {
     const { store, url } = await host();
     expect((await join(url, '--auto', 'both')).code).toBe(0);
-    expect((await loadConfig(paths(path.join(dir, 'home')))).auto).toEqual({ with: ['claude', 'codex'] });
+    expect((await loadConfig(paths(path.join(dir, 'home')))).agents).toEqual({ claude: { auto: true }, codex: { auto: true } });
     const forCodex = store.create({ objective: 'graphics', to: 'codex' });
     const forClaude = store.create({ objective: 'the PR', to: 'claude@box' });
     const forBox = store.create({ objective: 'anything', to: 'box' });
@@ -150,6 +154,8 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     const argv = await read('codex.runs');
     expect(argv).toContain('exec');
     expect(argv).not.toContain('dangerously'); // default permissions
+    expect(argv).toContain('--sandbox workspace-write'); // it may write in its own task folder
+    expect(argv).toContain('mcp_servers.handover.default_tools_approval_mode=approve'); // and use handover's tools
   });
 
   test('without a service, the MCP server an agent starts takes tasks; not inside a worker’s own agent', async () => {
@@ -179,6 +185,42 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     await until(async () => (await fs.readFile(lock, 'utf8').catch(() => '')).trim() === String(second.child.pid), 40_000);
   }, 60_000);
 
+  test('handover agents changes one agent, or all, without touching the others', async () => {
+    const { url } = await host();
+    expect((await join(url)).code).toBe(0);
+    const p = paths(path.join(dir, 'home'));
+    const agents = async () => (await loadConfig(p)).agents;
+    expect((await cli(['agents', 'all', 'on'])).code).toBe(0);
+    expect(await agents()).toEqual({ claude: { auto: true }, codex: { auto: true } });
+    expect((await cli(['agents', 'codex', 'full-access'])).code).toBe(0);
+    expect(await agents()).toEqual({ claude: { auto: true }, codex: { auto: true, fullAccess: true } });
+    expect((await cli(['agents', 'claude', 'off'])).code).toBe(0);
+    expect(await agents()).toEqual({ codex: { auto: true, fullAccess: true } });
+    expect((await cli(['agents', 'all', 'default-access'])).code).toBe(0);
+    expect(await agents()).toEqual({ codex: { auto: true } });
+    expect((await cli(['agents'])).code).toBe(0); // the list
+    expect((await cli(['agents', 'codex', 'sideways'])).code).not.toBe(0);
+  });
+
+  test('a 0.9–0.10 config ("auto") is read, and rewritten as per-agent settings', async () => {
+    const { url } = await host();
+    expect((await join(url)).code).toBe(0);
+    const p = paths(path.join(dir, 'home'));
+    await fs.writeFile(p.config, JSON.stringify({ ...(await loadConfig(p)), auto: { with: 'codex', fullAccess: true } }));
+    expect((await cli(['agents', 'codex', 'default-access'])).code).toBe(0);
+    const c = await loadConfig(p);
+    expect(c.auto).toBeUndefined();
+    expect(c.agents).toEqual({ codex: { auto: true } });
+  });
+
+  test('an agent that answers FAILED: marks the task failed, even when it exits 0', async () => {
+    const { store, url } = await host();
+    expect((await join(url)).code).toBe(0);
+    const task = store.create({ objective: 'please fail' });
+    expect((await cli(['worker', '--with', 'codex', '--once'])).code).toBe(0);
+    expect(store.get(task.id)).toMatchObject({ status: 'failed', output: 'FAILED: could not' });
+  });
+
   test('worker --with … --full-access passes the agent its bypass flag', async () => {
     const { store, url } = await host();
     expect((await join(url)).code).toBe(0);
@@ -192,9 +234,9 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     const { url } = await host();
     expect((await join(url)).code).toBe(0);
     const p = paths(path.join(dir, 'home'));
-    expect((await loadConfig(p)).auto).toBeUndefined();
+    expect((await loadConfig(p)).agents).toBeUndefined();
     expect((await cli(['auto', 'codex', '--full-access'])).code).toBe(0);
-    expect((await loadConfig(p)).auto).toEqual({ with: ['codex'], fullAccess: true });
+    expect((await loadConfig(p)).agents).toEqual({ codex: { auto: true, fullAccess: true } });
 
     const doctor = (await cli(['doctor', '--json'])).out;
     const checks = JSON.parse(doctor.slice(doctor.indexOf('[')));
@@ -202,7 +244,7 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     expect(byArea).toMatchObject({ 'claude code': 'ok', codex: 'ok', 'auto-pickup': 'warn' }); // full access warns
 
     expect((await cli(['auto', 'off'])).code).toBe(0);
-    expect((await loadConfig(p)).auto).toBeUndefined();
+    expect((await loadConfig(p)).agents?.codex?.auto).toBeFalsy();
   });
 
   test('unlink removes this install from both agents, and leaves another install’s alone', async () => {

@@ -7,7 +7,7 @@
 
 import { selfCommand } from './claude.ts';
 import { runProcess } from './process.ts';
-import { AGENT_KINDS, type AgentKind, type AutoPickup } from './types.ts';
+import { AGENT_KINDS, type AgentKind, type AgentSettings, type Config } from './types.ts';
 
 /** 'outdated': registered by this install before agents had their own address (no `--as`). */
 export type McpState = 'registered' | 'outdated' | 'missing' | 'not-installed';
@@ -87,8 +87,19 @@ export const ADAPTERS: Record<AgentKind, Adapter> = {
   codex: adapter('codex', 'Codex', {
     add: [],
     remove: [],
-    // "-": read the prompt from stdin. Otherwise Codex's own sandbox and approval settings apply.
-    exec: (full) => ['exec', '--skip-git-repo-check', ...(full ? ['--dangerously-bypass-approvals-and-sandbox'] : []), '-'],
+    // Unattended Codex can't answer approvals, so handover's own tools are
+    // approved up front (as for Claude), and it may write in the task's own
+    // folder (its working directory) but nowhere else, with no network.
+    // The -c value has no quotes: Codex reads a value that isn't TOML as a
+    // string, and quotes would not survive cmd on Windows. "-": prompt on stdin.
+    exec: (full) => [
+      'exec',
+      '--skip-git-repo-check',
+      '-c',
+      'mcp_servers.handover.default_tools_approval_mode=approve',
+      ...(full ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--sandbox', 'workspace-write']),
+      '-',
+    ],
   }),
 };
 
@@ -100,11 +111,6 @@ export function parseAgentKind(value: string, flag: string): AgentKind {
   throw new Error(`${flag} must be ${AGENT_KINDS.join(' or ')}`);
 }
 
-/** The agents auto-pickup runs (0.9 configs hold one name, later ones a list). */
-export const autoKinds = (auto: AutoPickup | undefined): AgentKind[] => (!auto ? [] : Array.isArray(auto.with) ? auto.with : [auto.with]);
-
-const labels = (kinds: AgentKind[]) => kinds.map((k) => ADAPTERS[k].label).join(' and ');
-
 /** `claude`, `codex`, `claude,codex` or `both` → agent kinds. */
 export function parseAgentKinds(value: string, flag: string): AgentKind[] {
   const parts = value === 'both' ? [...AGENT_KINDS] : value.split(',').map((v) => v.trim()).filter(Boolean);
@@ -112,11 +118,36 @@ export function parseAgentKinds(value: string, flag: string): AgentKind[] {
   return [...new Set(parts.map((v) => parseAgentKind(v, flag)))];
 }
 
-/** What auto-pickup does here, e.g. "Codex, with your usual permission settings; runs at login". */
-export function autoSummary(auto: AutoPickup | undefined, atLogin: boolean): string {
-  if (!auto) return 'off (turn on with handover auto claude|codex)';
-  const how = auto.fullAccess ? '⚠️ full access (no permission prompts or sandbox)' : 'with your usual permission settings';
-  return `${labels(autoKinds(auto))}, ${how}; ${atLogin ? 'runs at login' : 'runs while Claude Code or Codex is open'}`;
+/** Per-agent settings, reading the 0.9–0.10 `auto` field ({ with, fullAccess }). */
+export function agentSettings(config: Config): AgentSettings {
+  if (config.agents) return config.agents;
+  const legacy = config.auto;
+  if (!legacy) return {};
+  const kinds = Array.isArray(legacy.with) ? legacy.with : [legacy.with];
+  return Object.fromEntries(kinds.map((k) => [k, { auto: true, ...(legacy.fullAccess ? { fullAccess: true } : {}) }]));
 }
 
-export const describeAuto = (auto: AutoPickup | undefined, atLogin: boolean) => `Auto-pickup: ${autoSummary(auto, atLogin)}`;
+/** The agents that take handovers automatically here. */
+export const autoKinds = (config: Config): AgentKind[] => AGENT_KINDS.filter((k) => agentSettings(config)[k]?.auto === true);
+export const fullAccessFor = (config: Config, kind: AgentKind): boolean => agentSettings(config)[kind]?.fullAccess === true;
+
+/** The config with these settings (written as `agents`; the old `auto` field is dropped). */
+export function withAgentSettings(config: Config, settings: AgentSettings): Config {
+  const { auto: _legacy, agents: _old, ...rest } = config;
+  const agents: AgentSettings = {};
+  for (const k of AGENT_KINDS) {
+    const s = settings[k];
+    if (s?.auto || s?.fullAccess) agents[k] = { ...(s.auto ? { auto: true } : {}), ...(s.fullAccess ? { fullAccess: true } : {}) };
+  }
+  return Object.keys(agents).length ? { ...rest, agents } : rest;
+}
+
+/** What auto-pickup does here, e.g. "Codex (⚠️ full access) and Claude Code; runs at login". */
+export function autoSummary(config: Config, atLogin: boolean): string {
+  const kinds = autoKinds(config);
+  if (!kinds.length) return 'off (turn on with handover agents all on)';
+  const each = kinds.map((k) => `${ADAPTERS[k].label}${fullAccessFor(config, k) ? ' (⚠️ full access)' : ''}`).join(' and ');
+  return `${each}; ${atLogin ? 'runs at login' : 'runs while Claude Code or Codex is open'}`;
+}
+
+export const describeAuto = (config: Config, atLogin: boolean) => `Auto-pickup: ${autoSummary(config, atLogin)}`;

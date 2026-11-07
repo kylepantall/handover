@@ -9,7 +9,7 @@ import { ADAPTERS, parseAgentKind, parseAgentKinds } from './agents.ts';
 import { removeHook } from './claude.ts';
 import { paths } from './paths.ts';
 import { installService, serviceState, uninstallService } from './service.ts';
-import { isRelayUrl, runAuto, runHost, runJoin, runSetup, type AgentOptions } from './setup.ts';
+import { isRelayUrl, runAgents, runAuto, runHost, runJoin, runSetup, type AgentOptions } from './setup.ts';
 import { runListen, runTest } from './test.ts';
 import { AGENT_KINDS, TUNNELS, type AgentKind, type Tunnel } from './types.ts';
 import { runUpdate } from './update.ts';
@@ -28,8 +28,11 @@ Usage: handover <command>
                      Both add handover to Claude Code and Codex when installed, and ask (in a
                      terminal) whether one takes handovers automatically
   setup                         Menu: host or join
-  auto [claude|codex|both|off]  Show or change auto-pickup: run each handover unattended with that agent
-        [--full-access]         ...skipping its permission prompts and sandbox (⚠️ tasks come from other machines)
+  agents [WHO SETTING...]       List this machine's agents, or change them. WHO: claude, codex or all.
+                                SETTING: on / off (take handovers automatically), full-access (⚠️ no
+                                permission prompts or sandbox) / default-access. Example:
+                                handover agents all on, handover agents codex full-access
+  auto [claude|codex|both|off]  Older form: auto-pickup with exactly these agents [--full-access]
   test [--timeout SEC] [--json] Check this machine reaches the host, then a round robin: every online
                                 machine pings every other. Exits 1 if any link fails
   listen                        Answer test pings on a machine without Claude Code open
@@ -157,6 +160,8 @@ async function main(argv: string[]): Promise<number | null> {
         );
       return runJoin(p, { ...agentOptions(o), url, agent: str('agent') });
     }
+    case 'agents':
+      return runAgents(p, positionals);
     case 'auto': {
       // handover auto claude codex = handover auto claude,codex = handover auto both
       const choice = positionals.length ? positionals.join(',') : undefined;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0
+
+- `handover agents`: lists each agent (installed, MCP, auto-pickup, access) and changes one or all: `handover agents all on`, `handover agents codex off`, `handover agents codex full-access`, `handover agents all default-access`. Settings are per agent (`agents` in config.json; older `auto` configs are read and rewritten). `handover auto` still works.
+- Fix: Codex tasks could do nothing unattended. Codex now may write in the task's own folder (`--sandbox workspace-write`, no network), and handover's own tools are approved up front, so `handover_complete` works (as with Claude's `--allowedTools mcp__handover`).
+- Fix: a task the agent couldn't do was marked success because the agent exited 0. Agents are told to answer `FAILED: …`, and the task is marked failed.
+
 ## 0.10.0
 
 - Several agents per machine: each has its own address, `claude@pc` and `codex@pc`. `--to codex` reaches Codex on any machine, `--to codex@pc` one agent, and `--to pc` any agent there, as before. ⚠️ Update the host first: the matching happens in its relay.
