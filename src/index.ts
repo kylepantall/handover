@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, type ParseArgsConfig } from 'node:util';
-import { EXIT, hook, list, mcp, serve, wait, worker } from './commands.ts';
+import { clear, devices, EXIT, hook, list, mcp, serve, wait, worker } from './commands.ts';
 import { endpoint, loadConfig, roleOf } from './config.ts';
 import { readFile } from 'node:fs/promises';
 import { runDoctor } from './doctor.ts';
@@ -13,6 +13,7 @@ import { isRelayUrl, runAgents, runAuto, runHost, runJoin, runSetup, type AgentO
 import { runListen, runTest } from './test.ts';
 import { AGENT_KINDS, TUNNELS, type AgentKind, type Tunnel } from './types.ts';
 import { runUpdate } from './update.ts';
+import { updateNotice } from './updatecheck.ts';
 import { VERSION } from './version.ts';
 
 const HELP = `handover ${VERSION} — hand tasks between AI agents on different machines
@@ -38,13 +39,18 @@ Usage: handover <command>
   listen                        Answer test pings on a machine without Claude Code open
   wait --objective TEXT         Create a handover and block until an agent completes it
         [--context TEXT | --context-file PATH] [--priority N]
-        [--to MACHINE | claude | codex | codex@MACHINE]
+        [--to MACHINE | claude | codex | codex@MACHINE] (paired: handover devices)
         [--id ID] [--out DIR] [--timeout SEC] [--json]
   worker [--with claude|codex | --exec "CMD"]
                                 Take the next handover, pipe its briefing to the agent, repeat (default:
                                 the auto-pickup agent) [--full-access] [--agent NAME] [--lease SEC]
                                 [--interval SEC] [--once]
   list [--status S] [--for AGENT]
+  clear [ID...] [--all] [--yes] Delete finished handovers, or just these ids (open ones are cancelled).
+                                --all also cancels and deletes every open one
+  devices [--json]              The paired machines: online or not, version, agents, what's running.
+                                Only these can be sent tasks
+  devices forget NAME           Unpair a machine (or one agent address like codex@pc)
   serve                         Run the relay in the foreground (the service runs this)
         [--port N] [--host H] [--tunnel T] [--data FILE|none] [--lease SEC]
         [--max-attempts N] [--retention HOURS] [--log FILE] [--home DIR]
@@ -62,7 +68,7 @@ Usage: handover <command>
   hook                          Claude Code SessionStart hook
 
 Config: ~/.config/handover/config.json, %APPDATA%\\handover on Windows (HANDOVER_HOME overrides).
-Env overrides: HANDOVER_URL, HANDOVER_TOKEN, HANDOVER_AGENT.`;
+Env overrides: HANDOVER_URL, HANDOVER_TOKEN, HANDOVER_AGENT. HANDOVER_NO_UPDATE_CHECK=1 turns off the new-release notice.`;
 
 const s = { type: 'string' } as const;
 const b = { type: 'boolean' } as const;
@@ -75,6 +81,8 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
   auto: { 'full-access': b },
   mcp: { as: s },
   list: { status: s, for: s },
+  clear: { all: b, yes: b },
+  devices: { json: b },
   serve: { port: s, host: s, token: s, tunnel: s, data: s, lease: s, 'max-attempts': s, retention: s, log: s, home: s },
   link: { json: b },
   join: { agent: s, ...AGENT_FLAGS },
@@ -124,6 +132,12 @@ async function main(argv: string[]): Promise<number | null> {
   const str = (k: string) => o[k] as string | undefined;
   // --home: the Windows logon task can't set HANDOVER_HOME, so it passes the folder.
   const p = paths(command === 'serve' ? str('home') : undefined);
+
+  // On screen only: scripts and the agents' own connections get it another way.
+  if (process.stderr.isTTY && !['mcp', 'hook', 'serve', 'update'].includes(command ?? '')) {
+    const notice = await updateNotice(p);
+    if (notice) console.error(`${notice}\n`);
+  }
 
   switch (command) {
     case undefined:
@@ -208,6 +222,13 @@ async function main(argv: string[]): Promise<number | null> {
       });
     case 'list':
       return list(p, { status: str('status'), for: str('for') });
+    case 'clear':
+      return clear(p, { ids: positionals, all: o.all === true, yes: o.yes === true });
+    case 'devices': {
+      const [action, name, extra] = positionals;
+      if (extra || (action && (action !== 'forget' || !name))) throw new Error('Usage: handover devices [--json] | handover devices forget NAME');
+      return devices(p, { json: o.json === true, forget: name });
+    }
     case 'mcp':
       await mcp(p, { as: o.as == null ? undefined : parseAgentKind(String(o.as), '--as') });
       return null;

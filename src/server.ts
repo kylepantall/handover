@@ -66,7 +66,16 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
     if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
     const body = await readJson(req);
     // Agent identity for targeting/leases: ?agent=<name> or X-Handover-Agent header.
-    const agent = url.searchParams.get('agent') ?? req.headers['x-handover-agent'] ?? 'mcp-client';
+    const named = url.searchParams.get('agent') ?? req.headers['x-handover-agent'];
+    const agent = named ?? 'mcp-client';
+    // A client that says who it is can be sent tasks, like any paired machine.
+    if (named) {
+      try {
+        store.pair(String(named));
+      } catch {
+        // an invalid name: its tool calls report it
+      }
+    }
     // Stateless: a fresh server+transport per request, so any client (ChatGPT, Claude, ...) can connect.
     const server = buildMcpServer(api, { agentName: String(agent) });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -90,8 +99,9 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
         store.heartbeat((await readJson(req)) as any);
         return send(res, 200, { ok: true });
       }
-      if (req.method === 'GET') return send(res, 200, store.agents());
+      if (req.method === 'GET') return send(res, 200, store.agents({ all: url.searchParams.get('all') === '1' }));
     }
+    if (parts[0] === 'agents' && parts.length === 2 && req.method === 'DELETE') return send(res, 200, store.forget(parts[1]!));
     if (parts[0] !== 'tasks') return send(res, 404, { error: 'not found' });
 
     const [, id, action] = parts;
@@ -105,8 +115,10 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
       };
       return send(res, 200, store.list(filter).map(summarize));
     }
+    if (!id && m === 'DELETE') return send(res, 200, store.clear({ all: q.get('all') === '1' }));
     if (!id && m === 'POST') return send(res, 201, store.create((await readJson(req)) as any));
     if (id === 'next' && !action && m === 'POST') return send(res, 200, store.claimNext(await readJson(req)));
+    if (id && !action && m === 'DELETE') return send(res, 200, store.remove(id));
     if (id && !action && m === 'GET') return send(res, 200, store.get(id));
     if (id && action === 'claim' && m === 'POST') return send(res, 200, store.claim(id, await readJson(req)));
     if (id && action === 'renew' && m === 'POST') return send(res, 200, store.renew(id, await readJson(req)));

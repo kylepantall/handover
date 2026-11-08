@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { groupDevices } from './devices.ts';
 import { isTerminal } from './store.ts';
 import type { Api, Task, TaskSummary } from './types.ts';
 import { VERSION } from './version.ts';
@@ -52,8 +53,8 @@ export function briefing(task: Task): string {
 }
 
 /** Builds an MCP server whose tools operate on `api` (local store or remote relay) as `agentName`. */
-export function buildMcpServer(api: Api, { agentName = 'mcp-client' }: { agentName?: string } = {}): McpServer {
-  const server = new McpServer({ name: 'handover', version: VERSION });
+export function buildMcpServer(api: Api, { agentName = 'mcp-client', instructions }: { agentName?: string; instructions?: string } = {}): McpServer {
+  const server = new McpServer({ name: 'handover', version: VERSION }, instructions ? { instructions } : undefined);
 
   server.registerTool(
     'handover_list',
@@ -67,6 +68,18 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client' }: { agentNa
       const tasks = await api.list({ status: status === 'all' ? undefined : status, agent: agentName });
       return text(tasks.length ? tasks.map(brief) : 'No handovers.');
     })
+  );
+
+  server.registerTool(
+    'handover_devices',
+    {
+      title: 'List connected devices',
+      description:
+        'List the paired machines: online or not, what is running, and the agents there. Only these names and agent addresses (e.g. codex@pc) are accepted as `to` in handover_create.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    safe(async () => text(groupDevices(await api.agents({ all: true }))))
   );
 
   server.registerTool(
@@ -201,7 +214,7 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client' }: { agentNa
         to: z
           .string()
           .optional()
-          .describe('Who may take it: a machine ("pc"), an agent anywhere ("codex", "claude"), or one agent on one machine ("codex@pc"). Default: anyone'),
+          .describe('Who may take it. Must be paired: use a name from handover_devices, never a guess. A machine ("pc"), an agent anywhere ("codex", "claude"), or one agent on one machine ("codex@pc"). Default: anyone'),
         priority: z.number().int().min(-1000).max(1000).optional().describe('Higher is picked up first (default 0)'),
       },
     },

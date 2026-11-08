@@ -124,6 +124,7 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     const { store, url } = await host();
     expect((await join(url, '--auto', 'both')).code).toBe(0);
     expect((await loadConfig(paths(path.join(dir, 'home')))).agents).toEqual({ claude: { auto: true }, codex: { auto: true } });
+    store.heartbeat({ agent: 'codex@other', version: '1', platform: 'x', via: 'worker' });
     const forCodex = store.create({ objective: 'graphics', to: 'codex' });
     const forClaude = store.create({ objective: 'the PR', to: 'claude@box' });
     const forBox = store.create({ objective: 'anything', to: 'box' });
@@ -221,6 +222,65 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     expect(store.get(task.id)).toMatchObject({ status: 'failed', output: 'FAILED: could not' });
   });
 
+  test('clear deletes finished handovers; --all needs --yes outside a terminal', async () => {
+    const { store, url } = await host();
+    expect((await join(url)).code).toBe(0);
+    const done = store.create({ objective: 'done' });
+    store.complete(done.id, { output: 'x' });
+    const open = store.create({ objective: 'open' });
+
+    expect((await cli(['clear'])).code).toBe(0);
+    expect(store.list().map((t) => t.id)).toEqual([open.id]);
+    expect((await cli(['clear', '--all'])).code).not.toBe(0);
+    expect(store.list().map((t) => t.id)).toEqual([open.id]);
+    expect((await cli(['clear', '--all', '--yes'])).code).toBe(0);
+    expect(store.list()).toEqual([]);
+  });
+
+  test('clear with ids removes just those, and a missing id fails', async () => {
+    const { store, url } = await host();
+    expect((await join(url)).code).toBe(0);
+    const a = store.create({ objective: 'open' });
+    const b = store.create({ objective: 'claimed' });
+    const keep = store.create({ objective: 'keep' });
+    store.claim(b.id, { by: 'dead' });
+    expect((await cli(['clear', a.id, b.id])).code).toBe(0);
+    expect(store.list().map((t) => t.id)).toEqual([keep.id]);
+    expect((await cli(['clear', 'nope'])).code).not.toBe(0);
+    expect((await cli(['clear', keep.id, '--all', '--yes'])).code).not.toBe(0); // ids or --all
+    expect(store.list().map((t) => t.id)).toEqual([keep.id]);
+  });
+
+  test('join pairs the machine and its agents; other recipients are refused', async () => {
+    const { store, url } = await host();
+    expect((await join(url)).code).toBe(0);
+    for (const to of ['box', 'codex', 'claude', 'codex@box']) expect(store.create({ objective: 'x', to }).to).toBe(to);
+    for (const to of ['mac', 'claude@mac']) expect(() => store.create({ objective: 'x', to })).toThrow();
+    const { code } = await cli(['wait', '--objective', 'x', '--to', 'claude@mac', '--timeout', '2']);
+    expect(code).not.toBe(0);
+    expect(store.list().some((t) => t.to === 'claude@mac')).toBe(false);
+  });
+
+  test('devices forget unpairs a machine and its agents', async () => {
+    const { store, url } = await host();
+    expect((await join(url)).code).toBe(0);
+    store.heartbeat({ agent: 'old', version: '1', platform: 'x', via: 'mcp', addresses: ['codex@old'] });
+    expect((await cli(['devices', 'forget', 'old'])).code).toBe(0);
+    for (const to of ['old', 'codex@old']) expect(() => store.create({ objective: 'x', to })).toThrow();
+    expect((await cli(['devices', 'forget', 'old'])).code).not.toBe(0);
+  });
+
+  test('devices lists each machine with its agents', async () => {
+    const { store, url } = await host();
+    expect((await join(url)).code).toBe(0);
+    store.heartbeat({ agent: 'codex@pc', version: '1', platform: 'win32/x64', via: 'service' });
+    store.heartbeat({ agent: 'pc', version: '1', platform: 'win32/x64', via: 'mcp' });
+    const { code, out } = await cli(['devices', '--json']);
+    expect(code).toBe(0);
+    const list = JSON.parse(out.slice(out.indexOf('[')));
+    expect(list.find((d: { machine: string }) => d.machine === 'pc')).toMatchObject({ online: true, agents: ['codex@pc'], via: ['mcp', 'service'] });
+  });
+
   test('worker --with … --full-access passes the agent its bypass flag', async () => {
     const { store, url } = await host();
     expect((await join(url)).code).toBe(0);
@@ -284,6 +344,7 @@ test('handover_wait returns the result once the task finishes', async () => {
   await mcp.connect(b);
   const json = (r: unknown) => JSON.parse((r as { content: Array<{ text: string }> }).content[0]!.text);
 
+  store.heartbeat({ agent: 'codex@pc', version: '1', platform: 'x', via: 'worker' });
   const created = json(await mcp.callTool({ name: 'handover_create', arguments: { objective: 'draw it', to: 'codex' } }));
   expect(created.whenDone).toContain(`handover wait --id ${created.id}`);
   expect(json(await mcp.callTool({ name: 'handover_wait', arguments: { id: created.id, timeoutSeconds: 1 } })).status).toBe('pending');

@@ -140,6 +140,11 @@ test('worker auto-picks up and falls back to agent stdout', async () => {
 
 test('handover_next over MCP respects targeting and priority', async () => {
   await cancelPending();
+  await fetch(`${url}/agents`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ agent: 'bob', version: '1', platform: 'x', via: 'test' }),
+  });
   const waiter = run(['wait', '--objective', 'for bob only', '--to', 'bob', '--priority', '1']);
   const id = await idOf(waiter);
 

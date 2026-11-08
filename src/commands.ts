@@ -4,16 +4,19 @@ import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { format } from 'node:util';
 import path from 'node:path';
+import * as ui from '@clack/prompts';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { RelayError } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
 import { connect } from './connect.ts';
+import { formatDevices, groupDevices } from './devices.ts';
 import { ensureLocalRelay, hostRelay, keepLocalRelay, stopHosting } from './host.ts';
 import { startResponder } from './responder.ts';
 import type { Paths } from './paths.ts';
 import { generateToken, lanAddresses, startTunnel } from './server.ts';
 import { agentAddress, isTerminal } from './store.ts';
 import { buildMcpServer } from './tools.ts';
+import { updateNotice } from './updatecheck.ts';
 import { acquireWorkerLock, agentWork, WORKER_ENV, workLoop, type WorkOptions } from './worker.ts';
 import { autoKinds, fullAccessFor } from './agents.ts';
 import { STATUS, TUNNELS, type AgentKind, type Config, type Task, type TaskStatus, type Tunnel } from './types.ts';
@@ -207,6 +210,73 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
   return task.status === STATUS.FAILED ? EXIT.failed : EXIT.cancelled;
 }
 
+const TOO_OLD = 'the host is too old for this: run handover update there';
+
+/** `handover clear`: empties finished handovers; --all also cancels open ones; ids remove just those. */
+export async function clear(p: Paths, { ids = [], all = false, yes = false }: { ids?: string[]; all?: boolean; yes?: boolean }): Promise<number> {
+  if (ids.length && all) {
+    console.error('clear takes ids or --all, not both');
+    return EXIT.usage;
+  }
+  const config = await loadConfig(p);
+  await ensureLocalRelay(p, config); // a host's queue is on disk even when no relay is running
+  const { api } = await client(p);
+  if (ids.length) {
+    let missing = 0;
+    for (const id of ids) {
+      try {
+        const task = await api.remove(id);
+        console.log(`Removed ${id}${isTerminal(task.status) && task.status !== STATUS.CANCELLED ? '' : ' (cancelled)'}`);
+      } catch (err) {
+        if (!(err instanceof RelayError) || err.status !== 404) throw err;
+        if (err.code !== 'not_found') throw new Error(TOO_OLD);
+        console.error(`No handover ${id}`);
+        missing++;
+      }
+    }
+    return missing ? EXIT.failed : EXIT.ok;
+  }
+  if (all && !yes) {
+    if (!process.stdin.isTTY) {
+      console.error('clear --all also cancels open handovers: add --yes');
+      return EXIT.usage;
+    }
+    const open = (await api.list({ status: STATUS.PENDING })).length + (await api.list({ status: STATUS.CLAIMED })).length;
+    const answer = await ui.confirm({ message: `Delete every handover, cancelling ${open} still open? Anyone waiting on them is told it was cancelled.`, initialValue: false });
+    if (answer !== true) {
+      console.log('Nothing changed.');
+      return EXIT.ok;
+    }
+  }
+  try {
+    const { removed } = await api.clear({ all });
+    console.log(`Cleared ${removed} handover${removed === 1 ? '' : 's'}.`);
+    return EXIT.ok;
+  } catch (err) {
+    if (err instanceof RelayError && err.status === 404) throw new Error(TOO_OLD);
+    throw err;
+  }
+}
+
+/** `handover devices`: the paired machines. `devices forget NAME` unpairs one. */
+export async function devices(p: Paths, { json = false, forget }: { json?: boolean; forget?: string }): Promise<number> {
+  const config = await loadConfig(p);
+  await ensureLocalRelay(p, config);
+  const { api, label } = await client(p);
+  if (forget) {
+    const { removed } = await api.forget(forget);
+    if (!removed) {
+      console.error(`No paired device named ${forget}. See handover devices.`);
+      return EXIT.failed;
+    }
+    console.log(`Forgot ${forget}. It pairs again if handover still runs there with this token.`);
+    return EXIT.ok;
+  }
+  const list = groupDevices(await api.agents({ all: true }));
+  console.log(json ? JSON.stringify(list, null, 2) : `Host: ${label}\n\n${formatDevices(list)}`);
+  return EXIT.ok;
+}
+
 export interface WorkerOptions {
   exec?: string;
   /** Run this coding agent's CLI (default: the auto-pickup agents from setup). */
@@ -291,19 +361,26 @@ async function autoAgent(p: Paths, config: Config, kind: AgentKind, fullAccess: 
 /** Claude Code SessionStart hook. Never fails the session. */
 export async function hook(p: Paths): Promise<number> {
   try {
-    const { api, agent: machine } = await client(p);
-    const pending = await api.list({ status: STATUS.PENDING, agent: agentAddress('claude', machine) });
-    if (!pending.length) return EXIT.ok;
-    const lines = pending.map((t) => `- ${t.id} (priority ${t.priority}): ${t.objective}`).join('\n');
-    const additionalContext = `Pending handovers are waiting on the Handover relay:\n${lines}\n\nIf the user wants one picked up, call handover_next (or handover_claim with an id), do the work, then call handover_complete.`;
-    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext } }));
+    const notes: string[] = [];
+    const notice = await updateNotice(p);
+    if (notice) notes.push(`Tell the user once: ${notice}`);
+    try {
+      const { api, agent: machine } = await client(p);
+      const pending = await api.list({ status: STATUS.PENDING, agent: agentAddress('claude', machine) });
+      const lines = pending.map((t) => `- ${t.id} (priority ${t.priority}): ${t.objective}`).join('\n');
+      if (pending.length) notes.push(`Pending handovers are waiting on the Handover relay:\n${lines}\n\nIf the user wants one picked up, call handover_next (or handover_claim with an id), do the work, then call handover_complete.`);
+    } catch {
+      // Relay offline or not set up.
+    }
+    if (notes.length) console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: notes.join('\n\n') } }));
   } catch {
-    // Relay offline or not set up.
+    // Never fail the session.
   }
   return EXIT.ok;
 }
 
 export async function list(p: Paths, o: { status?: string; for?: string }): Promise<number> {
+  await ensureLocalRelay(p, await loadConfig(p)); // a host's queue is on disk even when no relay is running
   const { api } = await client(p);
   console.log(JSON.stringify(await api.list({ status: o.status as TaskStatus | undefined, agent: o.for }), null, 2));
   return EXIT.ok;
@@ -324,5 +401,6 @@ export async function mcp(p: Paths, { as }: { as?: AgentKind } = {}): Promise<vo
     await stopHosting();
     process.exit(EXIT.ok);
   });
-  await buildMcpServer(api, { agentName: as ? agentAddress(as, machine) : machine }).connect(new StdioServerTransport());
+  const notice = await updateNotice(p);
+  await buildMcpServer(api, { agentName: as ? agentAddress(as, machine) : machine, instructions: notice ? `Tell the user once: ${notice}` : undefined }).connect(new StdioServerTransport());
 }
