@@ -5,7 +5,8 @@
  * and report back, which is how `handover test` checks every pair.
  */
 
-import { isTerminal } from './store.ts';
+import { installedAgents } from './agents.ts';
+import { agentAddress, isTerminal } from './store.ts';
 import type { Api, Task } from './types.ts';
 import { VERSION } from './version.ts';
 
@@ -81,7 +82,9 @@ export interface Responder {
 /** Checks in with the host and answers pings for `agent` until stopped. */
 export function startResponder(api: Api, { agent, via }: { agent: string; via: string }, { pollMs = 1_000, beatMs = 20_000 } = {}): Responder {
   let stopped = false;
-  const beat = () => api.heartbeat({ agent, version: VERSION, platform, via }).catch(() => {});
+  // A machine also reports its agents, so tasks can be addressed to them.
+  const addresses = agent.includes('@') ? [] : installedAgents().map((a) => agentAddress(a.kind, agent));
+  const beat = () => api.heartbeat({ agent, version: VERSION, platform, via, addresses }).catch(() => {});
   void beat();
   const beatTimer = setInterval(beat, beatMs);
   beatTimer.unref?.();

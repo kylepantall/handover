@@ -112,6 +112,8 @@ export interface ClearResult {
 }
 
 export interface Heartbeat {
+  /** Agents installed on this machine (codex@pc), so they count as paired too. */
+  addresses?: string[];
   agent: string;
   version: string;
   platform: string;
@@ -127,6 +129,9 @@ export interface CompleteInput {
 /** What MCP tools and the CLI need from a relay, in-process or over HTTP. */
 export interface Api {
   clear(options?: ClearOptions): Promise<ClearResult>;
+  remove(id: string): Promise<Task>;
+  /** Unpairs a machine or agent address. */
+  forget(name: string): Promise<ClearResult>;
   create(input: CreateInput): Promise<Task>;
   list(filter?: ListFilter): Promise<Array<Task | TaskSummary>>;
   get(id: string): Promise<Task>;

@@ -2,9 +2,11 @@
 
 ## 0.12.0
 
-- `handover clear`: deletes finished handovers. `--all` also cancels and deletes open ones, and asks first (`--yes` in scripts). CLI only, so a task's text can't get an agent to wipe the queue.
+- `handover clear`: deletes finished handovers; `handover clear ID...` removes just those, cancelling any still open. `--all` also cancels and deletes every open one, and asks first (`--yes` in scripts). CLI only, so a task's text can't get an agent to wipe the queue.
 - `handover devices` (`--json`): the machines on this relay, with online status, version, platform, agents and what's running. New `handover_devices` MCP tool, so agents can find addresses for `to`.
-- ⚠️ Update the host for `clear`. A machine appears once a handover process has run there since the relay started.
+- New-release notice: commands in a terminal, Claude Code at session start and MCP clients are told when a newer release exists. Checked at most every 6 h, and a check delays a start by 1.5 s at most. `HANDOVER_NO_UPDATE_CHECK=1` turns it off.
+- ⚠️ Only paired devices can be sent tasks. The relay saves every machine that has checked in with its token (`join` does this), with its installed agents, and refuses a `to` that matches none of them; the error lists the valid names. `handover devices forget NAME` unpairs one.
+- ⚠️ Update the host, then each machine: until a machine runs 0.12, `to: "codex@pc"` is refused unless a worker there has checked in.
 
 ## 0.11.0
 

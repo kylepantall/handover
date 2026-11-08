@@ -39,6 +39,7 @@ test('claimNext returns null on an empty queue', () => {
 
 test('targeted tasks are only visible to and claimable by their agent', () => {
   const s = new Store();
+  s.heartbeat({ agent: 'bob', version: '1', platform: 'x', via: 'mcp' });
   s.create({ id: 'for-b', objective: 'x', to: 'bob' });
   s.create({ id: 'any', objective: 'x' });
   expect(s.list({ status: STATUS.PENDING, agent: 'alice' }).map((t) => t.id)).toEqual(['any']);

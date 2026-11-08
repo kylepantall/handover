@@ -74,6 +74,8 @@ export const PING_TTL_MS = 60_000;
 const PING_KEEP_MS = 5 * 60_000;
 /** An agent counts as online if it checked in within this long. */
 export const PRESENCE_TTL_MS = 90_000;
+/** A device's "last seen" is written to disk at most this often. */
+const SAVE_SEEN_MS = 10 * 60_000;
 
 /**
  * A task is visible to `agent` when it is unaddressed or addressed to it. An
@@ -105,7 +107,8 @@ export interface StoreOptions {
  */
 export class Store {
   #tasks = new Map<string, Task>();
-  #presence = new Map<string, { beat: Heartbeat; seen: number; via: Map<string, number> }>();
+  /** Paired names. `direct`: its own process last checked in (agent addresses a machine reports have none). */
+  #presence = new Map<string, { beat: Heartbeat; seen: number; direct: number; saved: number; via: Map<string, number> }>();
   #waiters = new Map<string, Set<(t: Task) => void>>();
   #seq = 0;
   readonly #file: string | null;
@@ -128,6 +131,8 @@ export class Store {
     if (kind !== 'task' && kind !== 'ping') throw new HandoverError('bad_request', 'kind must be task or ping');
     // A ping checks one machine: it must say which.
     if (kind === 'ping' && !to) throw new HandoverError('bad_request', 'a ping needs to');
+    const target = validateAgent(to, 'to');
+    if (target && kind === 'task') this.#assertPaired(target);
     const taskId = id ?? randomBytes(6).toString('hex');
     if (!ID_RE.test(taskId) || RESERVED_IDS.has(taskId)) throw new HandoverError('bad_request', 'invalid id');
     if (this.#tasks.has(taskId)) throw new HandoverError('conflict', 'id already exists');
@@ -138,7 +143,7 @@ export class Store {
       objective,
       context: String(context ?? ''),
       from: from == null ? null : String(from).slice(0, 128),
-      to: validateAgent(to, 'to'),
+      to: target,
       priority: validatePriority(priority),
       status: STATUS.PENDING,
       claimedBy: null,
@@ -228,6 +233,15 @@ export class Store {
     return { removed };
   }
 
+  /** Deletes one handover, cancelling it first if it's open (so anyone waiting is told). */
+  remove(id: string): Task {
+    const task = this.get(id);
+    if (!isTerminal(task.status)) this.#update(task, { status: STATUS.CANCELLED, leaseExpiresAt: null });
+    this.#tasks.delete(id);
+    this.#changed();
+    return task;
+  }
+
   /** Requeues expired claims (or fails them after maxAttempts) and prunes old finished tasks. */
   sweep(): void {
     const now = this.#now();
@@ -272,16 +286,71 @@ export class Store {
     });
   }
 
-  /** Presence: records that an agent's handover process is running. Not persisted. */
+  /**
+   * Presence: an agent's handover process is running, which also pairs the
+   * machine: it holds the token and stays on the list (saved) until forgotten.
+   * A machine's beat can name the agents installed there (codex@pc).
+   */
   heartbeat(beat: Heartbeat): void {
     const agent = validateAgent(beat.agent);
     if (!agent) throw new HandoverError('bad_request', 'agent is required');
     const now = this.#now();
-    const entry = this.#presence.get(agent) ?? { beat, seen: now, via: new Map<string, number>() };
-    entry.beat = { agent, version: String(beat.version ?? '').slice(0, 32), platform: String(beat.platform ?? '').slice(0, 32), via: '' };
-    entry.seen = now;
+    const version = String(beat.version ?? '').slice(0, 32);
+    const platform = String(beat.platform ?? '').slice(0, 32);
+    let save = this.#register(agent, version, platform, now);
+    const entry = this.#presence.get(agent)!;
+    entry.direct = now;
     entry.via.set(String(beat.via ?? 'unknown').slice(0, 32), now);
-    this.#presence.set(agent, entry);
+    if (!agent.includes('@') && Array.isArray(beat.addresses)) {
+      for (const a of beat.addresses.slice(0, 16)) {
+        if (typeof a === 'string' && a.endsWith(`@${agent}`) && AGENT_RE.test(a)) save = this.#register(a, version, platform, now) || save;
+      }
+    }
+    if (save) this.#changed();
+  }
+
+  /** Pairs a name that doesn't check in (an HTTP MCP client that says who it is). */
+  pair(name: unknown): void {
+    const agent = validateAgent(name);
+    if (agent && this.#register(agent, '', '', this.#now())) this.#changed();
+  }
+
+  /** Unpairs a machine (with its agents) or one agent address. */
+  forget(name: string): ClearResult {
+    const target = validateAgent(name);
+    if (!target) throw new HandoverError('bad_request', 'a name is required');
+    let removed = 0;
+    for (const key of [...this.#presence.keys()]) {
+      if (key === target || key.endsWith(`@${target}`)) {
+        this.#presence.delete(key);
+        removed++;
+      }
+    }
+    if (removed) this.#changed();
+    return { removed };
+  }
+
+  /** Records a paired name. Returns whether the saved list needs writing. */
+  #register(agent: string, version: string, platform: string, now: number): boolean {
+    const entry = this.#presence.get(agent);
+    if (!entry) {
+      this.#presence.set(agent, { beat: { agent, version, platform, via: '' }, seen: now, direct: -Infinity, saved: now, via: new Map() });
+      return true;
+    }
+    const changed = (!!version && version !== entry.beat.version) || (!!platform && platform !== entry.beat.platform);
+    entry.beat.version = version || entry.beat.version;
+    entry.beat.platform = platform || entry.beat.platform;
+    entry.seen = now;
+    if (!changed && now - entry.saved < SAVE_SEEN_MS) return false;
+    entry.saved = now;
+    return true;
+  }
+
+  /** Only tasks for machines and agents that are paired: an agent can't invent a recipient. */
+  #assertPaired(to: string): void {
+    const names = [...this.#presence.keys()];
+    if (names.some((name) => eligibleFor({ to }, name))) return;
+    throw new HandoverError('bad_request', `no paired device or agent "${to}". Paired: ${names.sort().join(', ') || 'none yet'}`);
   }
 
   /**
@@ -291,7 +360,8 @@ export class Store {
   agents({ all = false }: AgentsFilter = {}): AgentPresence[] {
     const now = this.#now();
     return [...this.#presence.values()]
-      .filter((e) => all || now - e.seen <= PRESENCE_TTL_MS)
+      // Without `all`: processes that can answer a ping, for handover test.
+      .filter((e) => all || now - e.direct <= PRESENCE_TTL_MS)
       .sort((a, b) => b.seen - a.seen)
       .map((e) => ({
         agent: e.beat.agent,
@@ -308,7 +378,13 @@ export class Store {
     if (!this.#file) return;
     fs.mkdirSync(path.dirname(this.#file), { recursive: true, mode: 0o700 });
     const tmp = `${this.#file}.${process.pid}.tmp`;
-    const state = { version: STATE_VERSION, seq: this.#seq, tasks: [...this.#tasks.values()] };
+    const devices = [...this.#presence.values()].map((e) => ({
+      agent: e.beat.agent,
+      version: e.beat.version,
+      platform: e.beat.platform,
+      lastSeen: new Date(e.seen).toISOString(),
+    }));
+    const state = { version: STATE_VERSION, seq: this.#seq, tasks: [...this.#tasks.values()], devices };
     fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
     replaceFileSync(tmp, this.#file);
   }
@@ -321,9 +397,14 @@ export class Store {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
       throw err;
     }
-    const state = JSON.parse(raw) as { version?: number; seq?: number; tasks?: Task[] };
+    const state = JSON.parse(raw) as { version?: number; seq?: number; tasks?: Task[]; devices?: Array<{ agent: string; version: string; platform: string; lastSeen: string }> };
     if (state?.version !== STATE_VERSION || !Array.isArray(state.tasks)) throw new Error(`unsupported state file: ${this.#file}`);
     for (const t of state.tasks) this.#tasks.set(t.id, t);
+    for (const d of Array.isArray(state.devices) ? state.devices : []) {
+      const seen = Date.parse(d.lastSeen);
+      if (!AGENT_RE.test(String(d.agent)) || !Number.isFinite(seen)) continue;
+      this.#presence.set(d.agent, { beat: { agent: d.agent, version: String(d.version ?? ''), platform: String(d.platform ?? ''), via: '' }, seen, direct: -Infinity, saved: seen, via: new Map() });
+    }
     this.#seq = Math.max(Number(state.seq) || 0, ...state.tasks.map((t) => t.seq || 0));
   }
 

@@ -79,6 +79,12 @@ test('when the hosting process exits, a waiting process takes over and the queue
   const host = run(['worker', '--exec', 'exit 1', '--interval', '600']);
   await until(healthy);
 
+  // A paired machine that never picks it up, so the task stays pending.
+  await fetch(`http://127.0.0.1:${port}/agents`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ agent: 'nobody-yet', version: '1', platform: 'x', via: 'test' }),
+  });
   const waiter = run(['wait', '--objective', 'survive the host', '--json', '--to', 'nobody-yet']);
   const id = await until(() => waiter.stderr().match(/HANDOVER_ID=(\S+)/)?.[1]);
 

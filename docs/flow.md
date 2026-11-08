@@ -52,6 +52,8 @@ One machine is the **host**: it runs the relay that holds the queue. Every other
 | `pc` | The machine (its agent name). Presence, pings and `handover test` use it |
 | `claude@pc`, `codex@pc` | One agent there: its MCP server (registered as `handover mcp --as claude`) and its auto-pickup worker claim tasks under this name |
 
+Paired means the machine holds the token and a handover process has checked in from it (`join` does this). The relay saves the list, with each machine's installed agents, and refuses a task whose `to` matches nothing on it. `handover devices forget NAME` unpairs; a machine still running handover pairs again.
+
 A task's `to` matches an agent when it's empty, equal to the name, or equal to either half of `kind@machine`. The host's relay does the matching, so update the host first (a 0.9 host only matches exact names).
 
 ## Rules

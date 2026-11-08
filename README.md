@@ -78,6 +78,8 @@ Every agent has its own address: `claude@pc`, `codex@pc`. Send a task to whoever
 | `codex` / `claude` | That agent, on any machine |
 | `codex@pc` | Only Codex on `pc` |
 
+Only paired devices and their agents are accepted: `to` with any other name is refused, and the error lists the valid ones. Agents can look them up with `handover_devices`.
+
 **Example:** ask Claude Code: *"Have Codex make the graphics for this page, wait for them, then finish the page and open a PR."* Claude calls `handover_create` with `to: "codex"`, then waits in the background with `handover wait --id …`. Claude Code wakes the session when Codex finishes, and Claude gets the files and carries on. If the request was itself a handover, Claude ends with `handover_complete`, putting the PR link in the output.
 
 | Waiting for a result | How |
@@ -127,8 +129,8 @@ If an agent can't finish, it answers `FAILED: …`, and the task is marked faile
 | `handover wait --objective "…"` | Create a task and block until it's done |
 | `handover worker [--with claude\|codex \| --exec "CMD"]` | Run tasks in the foreground with an agent |
 | `handover list` | Show the queue |
-| `handover clear` | Delete finished handovers (`--all` also cancels and deletes open ones) |
-| `handover devices` | The machines on this relay: online or not, version, agents, what's running |
+| `handover clear [ID…]` | Delete finished handovers, or just these ids (open ones are cancelled). `--all` also cancels and deletes every open one |
+| `handover devices` | The paired machines: online or not, version, agents, what's running. `handover devices forget NAME` unpairs one |
 | `handover link` | Host: print the join commands and token |
 | `handover listen` | Answer test pings on a machine without an agent open |
 | `handover unlink` | Remove handover from Claude Code and Codex |
@@ -201,7 +203,7 @@ No option: a menu asks host or join. Old `--peer` / `--relay` flags still work (
 | Feature | How |
 |---|---|
 | Order | Highest `priority` first, then oldest |
-| Targeting | `--to pc`, `--to codex` or `--to codex@pc`: see [Agents working together](#agents-working-together) |
+| Targeting | `--to pc`, `--to codex` or `--to codex@pc`: see [Agents working together](#agents-working-together). Must be paired (`handover devices`); anything else is refused |
 | Leases | A claim lasts 10 min and is renewed while the agent works; a dead agent's task goes back to the queue and fails after 3 claims |
 | Persistence | `tasks.json` in the config folder; finished tasks are kept for 24 h |
 
@@ -240,7 +242,8 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 | | |
 |---|---|
 | File | `config.json` (0600): `role`, `url`, `token`, `agent`, `auto`, `relay` |
-| Env overrides | `HANDOVER_URL`, `HANDOVER_TOKEN`, `HANDOVER_AGENT`, `HANDOVER_HOME` (folder) |
+| Env overrides | `HANDOVER_URL`, `HANDOVER_TOKEN`, `HANDOVER_AGENT`, `HANDOVER_HOME` (folder), `HANDOVER_NO_UPDATE_CHECK=1` |
+| Updates | Commands in a terminal, Claude Code at session start and MCP clients are told when a new release is out (checked at most every 6 h) |
 | Log | `handover service log` |
 
 </details>

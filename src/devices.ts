@@ -33,14 +33,14 @@ function ago(iso: string): string {
 }
 
 export function formatDevices(devices: Device[]): string {
-  if (!devices.length) return 'No devices have checked in yet. A machine appears once Claude Code, Codex, a worker or handover listen runs there.';
+  if (!devices.length) return 'No paired devices yet. A machine pairs when it runs handover join.';
   const rows = [
     ['device', 'status', 'version', 'platform', 'agents', 'running', 'last seen'],
     ...devices.map((d) => [
       d.machine,
       d.online ? 'online' : 'offline',
-      d.version,
-      d.platform,
+      d.version || '-',
+      d.platform || '-',
       d.agents.join(', ') || '-',
       d.via.join(', ') || '-',
       ago(d.lastSeen),
