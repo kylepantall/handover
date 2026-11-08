@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, type ParseArgsConfig } from 'node:util';
-import { EXIT, hook, list, mcp, serve, wait, worker } from './commands.ts';
+import { clear, devices, EXIT, hook, list, mcp, serve, wait, worker } from './commands.ts';
 import { endpoint, loadConfig, roleOf } from './config.ts';
 import { readFile } from 'node:fs/promises';
 import { runDoctor } from './doctor.ts';
@@ -45,6 +45,8 @@ Usage: handover <command>
                                 the auto-pickup agent) [--full-access] [--agent NAME] [--lease SEC]
                                 [--interval SEC] [--once]
   list [--status S] [--for AGENT]
+  clear [--all] [--yes]         Delete finished handovers. --all also cancels and deletes open ones
+  devices [--json]              The machines on this relay: online or not, version, agents, what's running
   serve                         Run the relay in the foreground (the service runs this)
         [--port N] [--host H] [--tunnel T] [--data FILE|none] [--lease SEC]
         [--max-attempts N] [--retention HOURS] [--log FILE] [--home DIR]
@@ -75,6 +77,8 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
   auto: { 'full-access': b },
   mcp: { as: s },
   list: { status: s, for: s },
+  clear: { all: b, yes: b },
+  devices: { json: b },
   serve: { port: s, host: s, token: s, tunnel: s, data: s, lease: s, 'max-attempts': s, retention: s, log: s, home: s },
   link: { json: b },
   join: { agent: s, ...AGENT_FLAGS },
@@ -208,6 +212,10 @@ async function main(argv: string[]): Promise<number | null> {
       });
     case 'list':
       return list(p, { status: str('status'), for: str('for') });
+    case 'clear':
+      return clear(p, { all: o.all === true, yes: o.yes === true });
+    case 'devices':
+      return devices(p, { json: o.json === true });
     case 'mcp':
       await mcp(p, { as: o.as == null ? undefined : parseAgentKind(String(o.as), '--as') });
       return null;

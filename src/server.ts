@@ -90,7 +90,7 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
         store.heartbeat((await readJson(req)) as any);
         return send(res, 200, { ok: true });
       }
-      if (req.method === 'GET') return send(res, 200, store.agents());
+      if (req.method === 'GET') return send(res, 200, store.agents({ all: url.searchParams.get('all') === '1' }));
     }
     if (parts[0] !== 'tasks') return send(res, 404, { error: 'not found' });
 
@@ -105,6 +105,7 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
       };
       return send(res, 200, store.list(filter).map(summarize));
     }
+    if (!id && m === 'DELETE') return send(res, 200, store.clear({ all: q.get('all') === '1' }));
     if (!id && m === 'POST') return send(res, 201, store.create((await readJson(req)) as any));
     if (id === 'next' && !action && m === 'POST') return send(res, 200, store.claimNext(await readJson(req)));
     if (id && !action && m === 'GET') return send(res, 200, store.get(id));

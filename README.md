@@ -127,6 +127,8 @@ If an agent can't finish, it answers `FAILED: …`, and the task is marked faile
 | `handover wait --objective "…"` | Create a task and block until it's done |
 | `handover worker [--with claude\|codex \| --exec "CMD"]` | Run tasks in the foreground with an agent |
 | `handover list` | Show the queue |
+| `handover clear` | Delete finished handovers (`--all` also cancels and deletes open ones) |
+| `handover devices` | The machines on this relay: online or not, version, agents, what's running |
 | `handover link` | Host: print the join commands and token |
 | `handover listen` | Answer test pings on a machine without an agent open |
 | `handover unlink` | Remove handover from Claude Code and Codex |
@@ -220,6 +222,7 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 | Tool | Does |
 |---|---|
 | `handover_list` | Tasks you can pick up |
+| `handover_devices` | Machines on the relay and their agent addresses |
 | `handover_next` | Claim the next task |
 | `handover_watch` | Wait for the next task to arrive, then claim it |
 | `handover_wait` | Wait for a task you created to finish; returns its output and files |

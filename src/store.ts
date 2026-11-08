@@ -2,8 +2,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { replaceFileSync } from './paths.ts';
-import {
-  FAILURE,
+import { FAILURE,
   STATUS,
   type AgentPresence,
   type Heartbeat,
@@ -15,8 +14,7 @@ import {
   type Task,
   type TaskFile,
   type TaskStatus,
-  type TaskSummary,
-} from './types.ts';
+  type TaskSummary, type AgentsFilter, type ClearOptions, type ClearResult } from './types.ts';
 
 const TERMINAL = new Set<TaskStatus>([STATUS.SUCCESS, STATUS.FAILED, STATUS.CANCELLED]);
 const ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
@@ -214,6 +212,22 @@ export class Store {
     return this.#update(task, { status: STATUS.CANCELLED, leaseExpiresAt: null });
   }
 
+  /**
+   * Deletes finished handovers. With `all`, also cancels open ones first (so
+   * anyone waiting is told) and deletes those. Pings are left to the sweep.
+   */
+  clear({ all = false }: ClearOptions = {}): ClearResult {
+    let removed = 0;
+    for (const task of [...this.#tasks.values()]) {
+      if (kindOf(task) === 'ping' || (!all && !isTerminal(task.status))) continue;
+      if (!isTerminal(task.status)) this.#update(task, { status: STATUS.CANCELLED, leaseExpiresAt: null });
+      this.#tasks.delete(task.id);
+      removed++;
+    }
+    if (removed) this.#changed();
+    return { removed };
+  }
+
   /** Requeues expired claims (or fails them after maxAttempts) and prunes old finished tasks. */
   sweep(): void {
     const now = this.#now();
@@ -270,11 +284,14 @@ export class Store {
     this.#presence.set(agent, entry);
   }
 
-  /** Agents that checked in within PRESENCE_TTL_MS, most recent first. */
-  agents(): AgentPresence[] {
+  /**
+   * Agents that checked in within PRESENCE_TTL_MS, most recent first. With
+   * `all`, also those seen earlier since the relay started.
+   */
+  agents({ all = false }: AgentsFilter = {}): AgentPresence[] {
     const now = this.#now();
     return [...this.#presence.values()]
-      .filter((e) => now - e.seen <= PRESENCE_TTL_MS)
+      .filter((e) => all || now - e.seen <= PRESENCE_TTL_MS)
       .sort((a, b) => b.seen - a.seen)
       .map((e) => ({
         agent: e.beat.agent,
@@ -282,6 +299,7 @@ export class Store {
         platform: e.beat.platform,
         via: [...e.via].filter(([, t]) => now - t <= PRESENCE_TTL_MS).map(([v]) => v).sort(),
         lastSeen: new Date(e.seen).toISOString(),
+        online: now - e.seen <= PRESENCE_TTL_MS,
       }));
   }
 

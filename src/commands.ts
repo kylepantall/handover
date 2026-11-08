@@ -4,10 +4,12 @@ import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { format } from 'node:util';
 import path from 'node:path';
+import * as ui from '@clack/prompts';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { RelayError } from './client.ts';
 import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
 import { connect } from './connect.ts';
+import { formatDevices, groupDevices } from './devices.ts';
 import { ensureLocalRelay, hostRelay, keepLocalRelay, stopHosting } from './host.ts';
 import { startResponder } from './responder.ts';
 import type { Paths } from './paths.ts';
@@ -207,6 +209,43 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
   return task.status === STATUS.FAILED ? EXIT.failed : EXIT.cancelled;
 }
 
+/** `handover clear`: empties finished handovers; --all also cancels open ones. */
+export async function clear(p: Paths, { all = false, yes = false }: { all?: boolean; yes?: boolean }): Promise<number> {
+  const config = await loadConfig(p);
+  await ensureLocalRelay(p, config); // a host's queue is on disk even when no relay is running
+  const { api } = await client(p);
+  if (all && !yes) {
+    if (!process.stdin.isTTY) {
+      console.error('clear --all also cancels open handovers: add --yes');
+      return EXIT.usage;
+    }
+    const open = (await api.list({ status: STATUS.PENDING })).length + (await api.list({ status: STATUS.CLAIMED })).length;
+    const answer = await ui.confirm({ message: `Delete every handover, cancelling ${open} still open? Anyone waiting on them is told it was cancelled.`, initialValue: false });
+    if (answer !== true) {
+      console.log('Nothing changed.');
+      return EXIT.ok;
+    }
+  }
+  try {
+    const { removed } = await api.clear({ all });
+    console.log(`Cleared ${removed} handover${removed === 1 ? '' : 's'}.`);
+    return EXIT.ok;
+  } catch (err) {
+    if (err instanceof RelayError && err.status === 404) throw new Error('the host is too old for this: run handover update there');
+    throw err;
+  }
+}
+
+/** `handover devices`: the machines on this relay. */
+export async function devices(p: Paths, { json = false }: { json?: boolean }): Promise<number> {
+  const config = await loadConfig(p);
+  await ensureLocalRelay(p, config);
+  const { api, label } = await client(p);
+  const list = groupDevices(await api.agents({ all: true }));
+  console.log(json ? JSON.stringify(list, null, 2) : `Host: ${label}\n\n${formatDevices(list)}`);
+  return EXIT.ok;
+}
+
 export interface WorkerOptions {
   exec?: string;
   /** Run this coding agent's CLI (default: the auto-pickup agents from setup). */
@@ -304,6 +343,7 @@ export async function hook(p: Paths): Promise<number> {
 }
 
 export async function list(p: Paths, o: { status?: string; for?: string }): Promise<number> {
+  await ensureLocalRelay(p, await loadConfig(p)); // a host's queue is on disk even when no relay is running
   const { api } = await client(p);
   console.log(JSON.stringify(await api.list({ status: o.status as TaskStatus | undefined, agent: o.for }), null, 2));
   return EXIT.ok;

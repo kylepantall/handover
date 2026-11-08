@@ -80,6 +80,35 @@ export interface AgentPresence {
   /** What is running there: relay, mcp, worker, listen, test. */
   via: string[];
   lastSeen: string;
+  /** Checked in recently. False only in `agents({ all: true })`; absent from relays before 0.12. */
+  online?: boolean;
+}
+
+export interface AgentsFilter {
+  /** Include agents that have gone quiet since the relay started. */
+  all?: boolean;
+}
+
+/** One machine on the relay, with every agent and process seen there. */
+export interface Device {
+  machine: string;
+  online: boolean;
+  version: string;
+  platform: string;
+  /** Per-agent addresses seen, e.g. codex@pc. */
+  agents: string[];
+  /** What is running there now: relay, mcp, service, worker, listen, test. */
+  via: string[];
+  lastSeen: string;
+}
+
+export interface ClearOptions {
+  /** Also cancel and delete open (pending or claimed) handovers. */
+  all?: boolean;
+}
+
+export interface ClearResult {
+  removed: number;
 }
 
 export interface Heartbeat {
@@ -97,6 +126,7 @@ export interface CompleteInput {
 
 /** What MCP tools and the CLI need from a relay, in-process or over HTTP. */
 export interface Api {
+  clear(options?: ClearOptions): Promise<ClearResult>;
   create(input: CreateInput): Promise<Task>;
   list(filter?: ListFilter): Promise<Array<Task | TaskSummary>>;
   get(id: string): Promise<Task>;
@@ -109,7 +139,7 @@ export interface Api {
   /** Presence: tell the host this agent is online. */
   heartbeat(beat: Heartbeat): Promise<void>;
   /** Agents seen recently, newest first. */
-  agents(): Promise<AgentPresence[]>;
+  agents(filter?: AgentsFilter): Promise<AgentPresence[]>;
 }
 
 export const TUNNELS = ['cloudflared', 'tailscale'] as const;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.0
+
+- `handover clear`: deletes finished handovers. `--all` also cancels and deletes open ones, and asks first (`--yes` in scripts). CLI only, so a task's text can't get an agent to wipe the queue.
+- `handover devices` (`--json`): the machines on this relay, with online status, version, platform, agents and what's running. New `handover_devices` MCP tool, so agents can find addresses for `to`.
+- ⚠️ Update the host for `clear`. A machine appears once a handover process has run there since the relay started.
+
 ## 0.11.0
 
 - `handover agents`: lists each agent (installed, MCP, auto-pickup, access) and changes one or all: `handover agents all on`, `handover agents codex off`, `handover agents codex full-access`, `handover agents all default-access`. Settings are per agent (`agents` in config.json; older `auto` configs are read and rewritten). `handover auto` still works.

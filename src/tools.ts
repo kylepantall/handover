@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { groupDevices } from './devices.ts';
 import { isTerminal } from './store.ts';
 import type { Api, Task, TaskSummary } from './types.ts';
 import { VERSION } from './version.ts';
@@ -67,6 +68,18 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client' }: { agentNa
       const tasks = await api.list({ status: status === 'all' ? undefined : status, agent: agentName });
       return text(tasks.length ? tasks.map(brief) : 'No handovers.');
     })
+  );
+
+  server.registerTool(
+    'handover_devices',
+    {
+      title: 'List connected devices',
+      description:
+        'List the machines on this relay: online or not, what is running, and the agents there. Use a machine name or an agent address (e.g. codex@pc) as `to` in handover_create.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    safe(async () => text(groupDevices(await api.agents({ all: true }))))
   );
 
   server.registerTool(

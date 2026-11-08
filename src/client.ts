@@ -49,7 +49,8 @@ export function httpApi({ url, token }: Endpoint): Api {
     cancel: (id) => call('POST', `/tasks/${enc(id)}/cancel`, {}),
     wait: (id, timeoutMs = 25_000) => call('GET', `/tasks/${enc(id)}/wait${query({ timeout: timeoutMs })}`),
     heartbeat: async (beat) => void (await call('POST', '/agents', beat)),
-    agents: () => call('GET', '/agents'),
+    agents: ({ all } = {}) => call('GET', `/agents${query({ all: all ? 1 : undefined })}`),
+    clear: ({ all } = {}) => call('DELETE', `/tasks${query({ all: all ? 1 : undefined })}`),
   };
 }
 
@@ -66,7 +67,8 @@ export function localApi(store: Store): Api {
     cancel: async (id) => store.cancel(id),
     wait: (id, timeoutMs = 25_000) => store.wait(id, timeoutMs),
     heartbeat: async (beat) => store.heartbeat(beat),
-    agents: async () => store.agents(),
+    agents: async (filter) => store.agents(filter),
+    clear: async (options) => store.clear(options),
   };
 }
 

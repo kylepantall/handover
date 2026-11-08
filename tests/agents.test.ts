@@ -221,6 +221,32 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     expect(store.get(task.id)).toMatchObject({ status: 'failed', output: 'FAILED: could not' });
   });
 
+  test('clear deletes finished handovers; --all needs --yes outside a terminal', async () => {
+    const { store, url } = await host();
+    expect((await join(url)).code).toBe(0);
+    const done = store.create({ objective: 'done' });
+    store.complete(done.id, { output: 'x' });
+    const open = store.create({ objective: 'open' });
+
+    expect((await cli(['clear'])).code).toBe(0);
+    expect(store.list().map((t) => t.id)).toEqual([open.id]);
+    expect((await cli(['clear', '--all'])).code).not.toBe(0);
+    expect(store.list().map((t) => t.id)).toEqual([open.id]);
+    expect((await cli(['clear', '--all', '--yes'])).code).toBe(0);
+    expect(store.list()).toEqual([]);
+  });
+
+  test('devices lists each machine with its agents', async () => {
+    const { store, url } = await host();
+    expect((await join(url)).code).toBe(0);
+    store.heartbeat({ agent: 'codex@pc', version: '1', platform: 'win32/x64', via: 'service' });
+    store.heartbeat({ agent: 'pc', version: '1', platform: 'win32/x64', via: 'mcp' });
+    const { code, out } = await cli(['devices', '--json']);
+    expect(code).toBe(0);
+    const list = JSON.parse(out.slice(out.indexOf('[')));
+    expect(list.find((d: { machine: string }) => d.machine === 'pc')).toMatchObject({ online: true, agents: ['codex@pc'], via: ['mcp', 'service'] });
+  });
+
   test('worker --with … --full-access passes the agent its bypass flag', async () => {
     const { store, url } = await host();
     expect((await join(url)).code).toBe(0);
