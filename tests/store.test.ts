@@ -80,6 +80,22 @@ test('renew extends the lease and only the claimer can renew', () => {
   expect(s.get('t').status).toBe(STATUS.CLAIMED);
 });
 
+test('activity pages resume after the retained window even when timestamps match', () => {
+  const s = new Store({ now: clock() });
+  s.create({ id: 't', objective: 'x' });
+  s.claim('t', { by: 'worker' });
+  for (let i = 0; i < 256; i++) s.progress('t', { by: 'worker', message: String(i) });
+  const first = s.activity('t', 0);
+  expect(first.truncated).toBe(true);
+  expect(first.events[0]?.message).toBe('0');
+  expect(first.events).toHaveLength(32);
+  expect(first.hasMore).toBe(true);
+  const next = s.activity('t', first.cursor);
+  expect(next.truncated).toBe(false);
+  expect(next.events[0]?.message).toBe('32');
+  expect(s.activity('t', 258).events).toEqual([]);
+});
+
 test('waiter wakes on completion', async () => {
   const s = new Store();
   s.create({ id: 't', objective: 'x' });
@@ -96,12 +112,14 @@ test('state persists across restarts', async () => {
   a.create({ id: 'one', objective: 'x', priority: 2 });
   a.create({ id: 'two', objective: 'y' });
   a.claim('two', { by: 'w' });
+  a.progress('two', { by: 'w', message: 'Working on the inputs' });
   a.flush();
   if (process.platform !== 'win32') expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
 
   const b = new Store({ file });
   expect(b.get('one').priority).toBe(2);
   expect(b.get('two').status).toBe(STATUS.CLAIMED);
+  expect(b.activity('two', 2).events[0]?.message).toBe('Working on the inputs');
   b.create({ id: 'three', objective: 'z' });
   expect(b.get('three').seq).toBeGreaterThan(b.get('two').seq);
   await fs.rm(dir, { recursive: true, force: true });

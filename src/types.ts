@@ -19,7 +19,26 @@ export interface TaskFile {
   content: string;
 }
 
+export interface ActivityEvent {
+  seq: number;
+  at: string;
+  status: TaskStatus;
+  agent: string | null;
+  message: string;
+}
+
+export interface ActivityPage {
+  id: string;
+  status: TaskStatus;
+  claimedBy: string | null;
+  events: ActivityEvent[];
+  cursor: number;
+  truncated: boolean;
+  hasMore: boolean;
+}
+
 export interface Task {
+  activity?: ActivityEvent[];
   id: string;
   seq: number;
   objective: string;
@@ -45,7 +64,7 @@ export interface Task {
 export const TASK_KINDS = ['task', 'ping'] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
-export type TaskSummary = Omit<Task, 'context' | 'output' | 'files' | 'seq'> & { fileCount: number };
+export type TaskSummary = Omit<Task, 'context' | 'output' | 'files' | 'seq' | 'activity'> & { fileCount: number };
 
 export interface CreateInput {
   id?: string;
@@ -135,6 +154,8 @@ export interface Api {
   create(input: CreateInput): Promise<Task>;
   list(filter?: ListFilter): Promise<Array<Task | TaskSummary>>;
   get(id: string): Promise<Task>;
+  activity(id: string, after: number): Promise<ActivityPage>;
+  progress(id: string, input: { by: string; message: string }): Promise<void>;
   claim(id: string, opts?: ClaimOptions): Promise<Task>;
   claimNext(opts?: ClaimOptions): Promise<Task | null>;
   renew(id: string, opts?: ClaimOptions): Promise<Task>;
