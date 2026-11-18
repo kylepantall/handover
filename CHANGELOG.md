@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.0
+
+- Ask Claude Code or Codex to “show running handovers” and “follow handover <id>” to see the worker and its timestamped updates. Following a task leaves its claim with the worker.
+- The relay records lifecycle changes and keeps the latest 256 events per task. Workers can add milestones with `handover_progress`. Observers can reconnect and resume from their last event.
+- Claude Code receives running handover IDs at session start. Update the relay host and the MCP clients to use the new activity tools.
+
 ## 0.12.0
 
 - `handover clear`: deletes finished handovers; `handover clear ID...` removes just those, cancelling any still open. `--all` also cancels and deletes every open one, and asks first (`--yes` in scripts). CLI only, so a task's text can't get an agent to wipe the queue.
