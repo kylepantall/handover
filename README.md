@@ -90,6 +90,12 @@ Only paired devices and their agents are accepted: `to` with any other name is r
 
 ⚠️ Each agent's auto-pickup worker does one task at a time. A task it's running that delegates to the same agent on the same machine (Claude's worker → `claude@pc`) waits until it times out. Delegate to the other agent or another machine.
 
+## Watch a running handover
+
+In Claude Code or Codex, ask **“Show running handovers”**, then **“Follow handover <id> and show me updates until it finishes.”** Either client can follow work on another machine. The observer can join after pickup, disconnect, and read missed updates later.
+
+Claude Code also receives running handover IDs in its session-start context. The relay records creation, claims, requeues, and final status automatically. Agents can post short milestones while working. The timeline keeps the latest 256 events per task until the task is cleared or expires. Earlier tasks show activity recorded after the relay upgrade. Updates appear in the chat where you ask to follow a task.
+
 ## How agents pick up tasks
 
 | Setup | What happens |
@@ -227,6 +233,9 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 | `handover_devices` | Machines on the relay and their agent addresses |
 | `handover_next` | Claim the next task |
 | `handover_watch` | Wait for the next task to arrive, then claim it |
+| `handover_running` | List running tasks and their workers across the relay |
+| `handover_follow` | Read timeline updates by task id and resume from the returned cursor |
+| `handover_progress` | Post a milestone as the current claimant |
 | `handover_wait` | Wait for a task you created to finish; returns its output and files |
 | `handover_claim` | Claim a specific task |
 | `handover_renew` | Extend your claim on long work |

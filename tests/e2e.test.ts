@@ -108,6 +108,35 @@ test('failed status propagates as non-zero exit', async () => {
   await mcp.close();
 });
 
+test('another client follows a running handover and resumes after a milestone', async () => {
+  const worker = await httpClient('codex@worker');
+  const observer = await httpClient('claude@observer');
+  try {
+    const { id } = parse(await observer.callTool({ name: 'handover_create', arguments: { objective: 'work', to: 'codex@worker' } }));
+    await worker.callTool({ name: 'handover_claim', arguments: { id } });
+    const running = parse(await observer.callTool({ name: 'handover_running', arguments: {} }));
+    expect(running.find((task: any) => task.id === id)?.claimedBy).toBe('codex@worker');
+    const hook = JSON.parse((await run(['hook']).done).stdout);
+    expect(hook.hookSpecificOutput.additionalContext).toContain(`${id} (codex@worker)`);
+    const follow = (after: number) => observer.callTool({ name: 'handover_follow', arguments: { id, after, timeoutSeconds: 3 } }).then(parse);
+    const first = await follow(0);
+    expect(first.events.map((event: any) => event.status)).toEqual(['pending', 'claimed']);
+    const args = { id, message: 'Finished reviewing the inputs' };
+    expect((await observer.callTool({ name: 'handover_progress', arguments: args })).isError).toBe(true);
+    const watching = follow(first.cursor);
+    await worker.callTool({ name: 'handover_progress', arguments: args });
+    const next = await watching;
+    expect(next.events.map((event: any) => event.message)).toEqual([args.message]);
+    await worker.callTool({ name: 'handover_complete', arguments: { id, output: 'done' } });
+    const last = await follow(next.cursor);
+    expect(last.events.map((event: any) => event.status)).toEqual(['success']);
+    expect((await follow(last.cursor)).events).toEqual([]);
+  } finally {
+    await worker.close();
+    await observer.close();
+  }
+});
+
 test('rejects requests without a valid token', async () => {
   for (const u of [`${url}/tasks`, `${url}/mcp`, `${url}/tasks?token=wrong`]) expect((await fetch(u)).status).toBe(401);
   expect((await fetch(`${url}/health`)).status).toBe(200);
@@ -119,6 +148,11 @@ test('stdio MCP proxies to the relay', async () => {
   const { id } = parse(await mcp.callTool({ name: 'handover_create', arguments: { objective: 'via stdio' } }));
   const task = (await (await fetch(`${url}/tasks/${id}`, { headers: auth })).json()) as { objective: string };
   expect(task.objective).toBe('via stdio');
+  await mcp.callTool({ name: 'handover_claim', arguments: { id } });
+  await mcp.callTool({ name: 'handover_progress', arguments: { id, message: 'Checking the relay' } });
+  const page = parse(await mcp.callTool({ name: 'handover_follow', arguments: { id, timeoutSeconds: 0 } }));
+  expect(page.events.at(-1)?.message).toBe('Checking the relay');
+  await mcp.callTool({ name: 'handover_complete', arguments: { id, output: 'done' } });
   await mcp.close();
 });
 

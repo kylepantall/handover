@@ -120,6 +120,11 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
     if (id === 'next' && !action && m === 'POST') return send(res, 200, store.claimNext(await readJson(req)));
     if (id && !action && m === 'DELETE') return send(res, 200, store.remove(id));
     if (id && !action && m === 'GET') return send(res, 200, store.get(id));
+    if (id && action === 'activity' && m === 'GET') return send(res, 200, store.activity(id, Number(q.get('after') ?? 0)));
+    if (id && action === 'progress' && m === 'POST') {
+      store.progress(id, (await readJson(req)) as { by: string; message: string });
+      return send(res, 200, { ok: true });
+    }
     if (id && action === 'claim' && m === 'POST') return send(res, 200, store.claim(id, await readJson(req)));
     if (id && action === 'renew' && m === 'POST') return send(res, 200, store.renew(id, await readJson(req)));
     if (id && action === 'complete' && m === 'POST') return send(res, 200, store.complete(id, await readJson(req)));

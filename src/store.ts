@@ -156,6 +156,7 @@ export class Store {
       updatedAt: now,
       ...(kind === 'ping' ? { kind } : {}),
     };
+    this.#record(task, 'Created', task.from);
     this.#tasks.set(taskId, task);
     this.#changed();
     return task;
@@ -408,6 +409,33 @@ export class Store {
     this.#seq = Math.max(Number(state.seq) || 0, ...state.tasks.map((t) => t.seq || 0));
   }
 
+  #record(task: Task, message: string, agent: string | null): void {
+    const events = task.activity ??= [];
+    events.push({ seq: (events.at(-1)?.seq ?? 0) + 1, at: task.updatedAt, status: task.status, agent, message });
+    if (events.length > 256) events.shift();
+  }
+
+  activity(id: string, after: number) {
+    const task = this.get(id);
+    if (!Number.isSafeInteger(after) || after < 0) throw new HandoverError('bad_request', 'invalid cursor');
+    const history = task.activity ?? [];
+    const events = history.filter(event => event.seq > after).slice(0, 32);
+    const cursor = events.at(-1)?.seq ?? after;
+    return { id, status: task.status, claimedBy: task.claimedBy, events, cursor,
+      truncated: (history[0]?.seq ?? 1) > after + 1, hasMore: (history.at(-1)?.seq ?? 0) > cursor };
+  }
+
+  progress(id: string, { by, message }: { by: string; message: string }): void {
+    const task = this.get(id);
+    if (!by || task.status !== STATUS.CLAIMED || task.claimedBy !== validateAgent(by))
+      throw new HandoverError('conflict', 'only the current claimant may report progress');
+    if (typeof message !== 'string' || !message.trim() || message.length > 512)
+      throw new HandoverError('bad_request', 'progress must be 1 to 512 characters');
+    task.updatedAt = this.#iso();
+    this.#record(task, message.trim(), by);
+    this.#changed();
+  }
+
   #iso(): string {
     return new Date(this.#now()).toISOString();
   }
@@ -429,7 +457,13 @@ export class Store {
   }
 
   #update(task: Task, patch: Partial<Task>): Task {
+    const previousOwner = task.claimedBy;
     Object.assign(task, patch, { updatedAt: this.#iso() });
+    if (patch.status) {
+      const message = patch.status === STATUS.PENDING ? 'Lease expired, requeued' :
+        patch.failureReason === FAILURE.LEASE_EXPIRED ? 'Lease expired, attempts exhausted' : patch.status;
+      this.#record(task, message, task.claimedBy ?? previousOwner);
+    }
     if (isTerminal(task.status)) {
       for (const fn of this.#waiters.get(task.id) ?? []) fn(task);
       this.#waiters.delete(task.id);
@@ -440,6 +474,6 @@ export class Store {
 }
 
 /** Public summary without the (possibly large) payloads. */
-export function summarize({ context: _c, output: _o, files, seq: _s, ...rest }: Task): TaskSummary {
+export function summarize({ context: _c, output: _o, files, seq: _s, activity: _a, ...rest }: Task): TaskSummary {
   return { ...rest, fileCount: files.length };
 }

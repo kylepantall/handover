@@ -28,6 +28,8 @@ const brief = (t: Task | TaskSummary) => ({
   to: t.to,
   from: t.from,
   createdAt: t.createdAt,
+  claimedBy: t.claimedBy,
+  updatedAt: t.updatedAt,
 });
 const toMs = (seconds: number | undefined) => (seconds == null ? undefined : seconds * 1000);
 const leaseSeconds = z.number().int().positive().max(86_400).optional().describe('Lease length in seconds (default set by the relay)');
@@ -42,6 +44,8 @@ export function briefing(task: Task): string {
     '',
     '## Context',
     task.context || '(none)',
+    '',
+    'For longer work, call handover_progress with this id and a short user-facing milestone as you make progress.',
     '',
     '## When finished',
     `Call the \`handover_complete\` tool with id "${task.id}", your final output, and any files`,
@@ -67,6 +71,54 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client', instruction
     safe(async ({ status = 'pending' }) => {
       const tasks = await api.list({ status: status === 'all' ? undefined : status, agent: agentName });
       return text(tasks.length ? tasks.map(brief) : 'No handovers.');
+    })
+  );
+
+  server.registerTool(
+    'handover_running',
+    {
+      title: 'Show running handovers',
+      description: 'Show claimed handovers across the relay, including work delegated to other agents and machines.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    safe(async () => text((await api.list({ status: 'claimed' })).map(brief)))
+  );
+
+  server.registerTool(
+    'handover_follow',
+    {
+      title: 'Follow handover activity',
+      description: 'Read timestamped activity without claiming the task. Show the updates to the user. To keep watching, call again with after set to cursor until the task is terminal and hasMore is false. Use handover_get for the final result.',
+      inputSchema: {
+        id: z.string(),
+        after: z.number().int().nonnegative().optional().describe('Last event cursor seen, default 0'),
+        timeoutSeconds: z.number().int().min(0).max(50).optional().describe('Wait for new activity, default 20 seconds. Use 0 for a snapshot.'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    safe(async ({ id, after = 0, timeoutSeconds = 20 }, extra) => {
+      const end = Date.now() + timeoutSeconds * 1000;
+      let page = await api.activity(id, after);
+      while (!page.events.length && !isTerminal(page.status) && Date.now() < end && !extra?.signal?.aborted) {
+        await Bun.sleep(Math.min(1000, end - Date.now()));
+        if (extra?.signal?.aborted) break;
+        page = await api.activity(id, after);
+      }
+      return text(page);
+    })
+  );
+
+  server.registerTool(
+    'handover_progress',
+    {
+      title: 'Report handover progress',
+      description: 'Add a short user-visible milestone to a handover you currently hold.',
+      inputSchema: { id: z.string(), message: z.string().trim().min(1).max(512) },
+    },
+    safe(async ({ id, message }) => {
+      await api.progress(id, { by: agentName, message });
+      return text('Progress recorded.');
     })
   );
 
@@ -225,6 +277,7 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client', instruction
         status: t.status,
         to: t.to,
         priority: t.priority,
+        follow: `Call handover_follow with id "${t.id}" to show progress in this chat.`,
         whenDone: `To be woken when it finishes, run \`handover wait --id ${t.id} --out handover-${t.id}\` as a background command (Claude Code: Bash with run_in_background): it exits with the output and saves the files. Without background commands, call handover_wait.`,
       });
     })

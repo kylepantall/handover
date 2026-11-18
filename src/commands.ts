@@ -366,7 +366,14 @@ export async function hook(p: Paths): Promise<number> {
     if (notice) notes.push(`Tell the user once: ${notice}`);
     try {
       const { api, agent: machine } = await client(p);
-      const pending = await api.list({ status: STATUS.PENDING, agent: agentAddress('claude', machine) });
+      const [pending, running] = await Promise.all([
+        api.list({ status: STATUS.PENDING, agent: agentAddress('claude', machine) }),
+        api.list({ status: STATUS.CLAIMED }),
+      ]);
+      if (running.length) {
+        const active = running.slice(0, 10).map(task => `- ${task.id} (${task.claimedBy ?? 'unidentified worker'})`).join('\n');
+        notes.push(`${running.length} running handover(s):\n${active}\nUse handover_running for the list or handover_follow to observe a task.`);
+      }
       const lines = pending.map((t) => `- ${t.id} (priority ${t.priority}): ${t.objective}`).join('\n');
       if (pending.length) notes.push(`Pending handovers are waiting on the Handover relay:\n${lines}\n\nIf the user wants one picked up, call handover_next (or handover_claim with an id), do the work, then call handover_complete.`);
     } catch {
