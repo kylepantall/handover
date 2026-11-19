@@ -10,6 +10,7 @@ import { FAILURE,
   type ClaimOptions,
   type CompleteInput,
   type CreateInput,
+  type TaskControls,
   type ListFilter,
   type Task,
   type TaskFile,
@@ -126,12 +127,16 @@ export class Store {
     if (file) this.#load();
   }
 
-  create({ id, objective, context = '', from = null, to = null, priority = 0, kind = 'task' }: CreateInput): Task {
+  create({ id, objective, context = '', from = null, to = null, priority = 0, kind = 'task', keyhopSession }: CreateInput): Task {
     if (typeof objective !== 'string' || !objective.trim()) throw new HandoverError('bad_request', 'objective is required');
     if (kind !== 'task' && kind !== 'ping') throw new HandoverError('bad_request', 'kind must be task or ping');
     // A ping checks one machine: it must say which.
     if (kind === 'ping' && !to) throw new HandoverError('bad_request', 'a ping needs to');
     const target = validateAgent(to, 'to');
+    if (keyhopSession !== undefined && typeof keyhopSession !== 'boolean')
+      throw new HandoverError('bad_request', 'keyhopSession must be a boolean');
+    if (keyhopSession && (kind !== 'task' || !target || target === 'claude' || target === 'codex'))
+      throw new HandoverError('bad_request', 'a Keyhop session needs a target machine or an agent@machine address');
     if (target && kind === 'task') this.#assertPaired(target);
     const taskId = id ?? randomBytes(6).toString('hex');
     if (!ID_RE.test(taskId) || RESERVED_IDS.has(taskId)) throw new HandoverError('bad_request', 'invalid id');
@@ -155,6 +160,7 @@ export class Store {
       createdAt: now,
       updatedAt: now,
       ...(kind === 'ping' ? { kind } : {}),
+      ...(keyhopSession ? { keyhopSession: true } : {}),
     };
     this.#record(task, 'Created', task.from);
     this.#tasks.set(taskId, task);
@@ -175,38 +181,54 @@ export class Store {
     return task;
   }
 
-  claim(id: string, { by = null, leaseMs }: ClaimOptions = {}): Task {
+  claim(id: string, { by = null, leaseMs, interactive, managed }: ClaimOptions = {}): Task {
     const task = this.get(id);
     const agent = validateAgent(by);
     if (task.status !== STATUS.PENDING) throw new HandoverError('conflict', 'task is not pending');
     if (!eligibleFor(task, agent)) throw new HandoverError('conflict', 'task is addressed to another agent');
+    if (task.keyhopSession && (interactive !== true || managed === true))
+      throw new HandoverError('conflict', 'this task needs an interactive Keyhop approval on its target machine');
     return this.#update(task, {
       status: STATUS.CLAIMED,
       claimedBy: agent,
       attempts: task.attempts + 1,
       leaseExpiresAt: this.#leaseUntil(leaseMs),
+      managed: managed === true ? true : undefined,
+      directions: undefined,
+      stopRequestedAt: undefined,
+      stoppedAt: undefined,
     });
   }
 
   /** Atomically claims the highest-priority eligible pending task, or returns null. */
-  claimNext({ by = null, leaseMs, kind = 'task' }: ClaimOptions = {}): Task | null {
+  claimNext({ by = null, leaseMs, kind = 'task', interactive, managed }: ClaimOptions = {}): Task | null {
     const agent = validateAgent(by);
-    const [next] = this.list({ status: STATUS.PENDING, agent: agent ?? '', kind });
-    return next ? this.claim(next.id, { by: agent, leaseMs }) : null;
+    const next = this.list({ status: STATUS.PENDING, agent: agent ?? '', kind })
+      .find((task) => !task.keyhopSession || (interactive === true && managed !== true));
+    return next ? this.claim(next.id, { by: agent, leaseMs, interactive, managed }) : null;
   }
 
   /** Extends the lease of a task claimed by `by`. */
-  renew(id: string, { by = null, leaseMs }: ClaimOptions = {}): Task {
+  renew(id: string, { by = null, leaseMs, attempt }: ClaimOptions = {}): Task {
     const task = this.get(id);
     const agent = validateAgent(by);
     if (task.status !== STATUS.CLAIMED) throw new HandoverError('conflict', 'task is not claimed');
     if (task.claimedBy !== agent) throw new HandoverError('conflict', 'task is claimed by another agent');
+    if (attempt !== undefined && task.attempts !== attempt)
+      throw new HandoverError('conflict', 'the worker no longer holds this claim');
     return this.#update(task, { leaseExpiresAt: this.#leaseUntil(leaseMs) });
   }
 
-  complete(id: string, { status = STATUS.SUCCESS, output = '', files }: CompleteInput = {}): Task {
+  complete(id: string, { status = STATUS.SUCCESS, output = '', files, claim }: CompleteInput = {}): Task {
     const task = this.get(id);
+    if (claim && task.managed && task.status === STATUS.CANCELLED &&
+        task.claimedBy === claim.by && task.attempts === claim.attempt) {
+      this.workerStopped(id, claim.by, claim.attempt);
+      return task;
+    }
     if (isTerminal(task.status)) throw new HandoverError('conflict', 'task already finished');
+    if (claim && (task.status !== STATUS.CLAIMED || task.claimedBy !== claim.by || task.attempts !== claim.attempt))
+      throw new HandoverError('conflict', 'the worker no longer holds this claim');
     if (status !== STATUS.SUCCESS && status !== STATUS.FAILED)
       throw new HandoverError('bad_request', 'status must be success or failed');
     return this.#update(task, { status, output: String(output ?? ''), files: validateFiles(files), leaseExpiresAt: null });
@@ -215,7 +237,63 @@ export class Store {
   cancel(id: string): Task {
     const task = this.get(id);
     if (isTerminal(task.status)) return task;
-    return this.#update(task, { status: STATUS.CANCELLED, leaseExpiresAt: null });
+    return this.#update(task, {
+      status: STATUS.CANCELLED,
+      leaseExpiresAt: null,
+      ...(task.status === STATUS.CLAIMED ? { stopRequestedAt: this.#iso() } : {}),
+    });
+  }
+
+  stop(id: string, attempt: number): Task {
+    const task = this.get(id);
+    this.#assertActiveAttempt(task, attempt);
+    return this.cancel(id);
+  }
+
+  direct(id: string, attempt: number, message: string): void {
+    const task = this.get(id);
+    this.#assertActiveAttempt(task, attempt);
+    if (typeof message !== 'string' || !message.trim() || message.length > 512)
+      throw new HandoverError('bad_request', 'direction must be 1 to 512 characters');
+    const directions = task.directions ??= [];
+    if (directions.length >= 32) throw new HandoverError('conflict', 'this claim already has 32 directions');
+    const at = this.#iso();
+    directions.push({ cursor: directions.length + 1, at, message: message.trim() });
+    task.updatedAt = at;
+    this.#record(task, 'Direction sent to agent', null);
+    this.#changed();
+  }
+
+  controls(id: string, by: string, attempt: number, after: number): TaskControls {
+    const task = this.get(id);
+    if (!by || task.claimedBy !== validateAgent(by) || task.attempts !== attempt)
+      throw new HandoverError('conflict', 'only the current claimant may read these directions');
+    if (!Number.isSafeInteger(after) || after < 0) throw new HandoverError('bad_request', 'invalid direction cursor');
+    if (task.status !== STATUS.CLAIMED) return { status: task.status, cursor: after, directions: [] };
+    const directions = (task.directions ?? []).filter((entry) => entry.cursor > after);
+    const unread = directions.filter((entry) => entry.deliveredAt === undefined);
+    if (unread.length) {
+      task.updatedAt = this.#iso();
+      for (const direction of unread) direction.deliveredAt = task.updatedAt;
+      this.#record(task, `Agent read ${unread.length} ${unread.length === 1 ? 'direction' : 'directions'}`, by);
+      this.#changed();
+    }
+    return { status: task.status, cursor: directions.at(-1)?.cursor ?? after, directions };
+  }
+
+  workerStopped(id: string, by: string, attempt: number): void {
+    const task = this.get(id);
+    if (task.status !== STATUS.CANCELLED || !task.managed || task.claimedBy !== validateAgent(by) || task.attempts !== attempt)
+      throw new HandoverError('conflict', 'this worker has no matching cancelled claim');
+    if (task.stoppedAt) return;
+    task.updatedAt = task.stoppedAt = this.#iso();
+    this.#record(task, 'Worker process stopped', by);
+    this.#changed();
+  }
+
+  #assertActiveAttempt(task: Task, attempt: number): void {
+    if (task.status !== STATUS.CLAIMED || task.attempts !== attempt)
+      throw new HandoverError('conflict', 'the selected claim is no longer active');
   }
 
   /**
@@ -261,7 +339,7 @@ export class Store {
         if (task.attempts >= this.#maxAttempts) {
           this.#update(task, { status: STATUS.FAILED, failureReason: FAILURE.LEASE_EXPIRED, leaseExpiresAt: null });
         } else {
-          this.#update(task, { status: STATUS.PENDING, claimedBy: null, leaseExpiresAt: null });
+          this.#update(task, { status: STATUS.PENDING, claimedBy: null, leaseExpiresAt: null, managed: undefined, directions: undefined });
         }
       } else if (isTerminal(task.status) && now - Date.parse(task.updatedAt) > this.#retentionMs) {
         this.#tasks.delete(task.id);
@@ -421,7 +499,7 @@ export class Store {
     const history = task.activity ?? [];
     const events = history.filter(event => event.seq > after).slice(0, 32);
     const cursor = events.at(-1)?.seq ?? after;
-    return { id, status: task.status, claimedBy: task.claimedBy, events, cursor,
+    return { id, status: task.status, claimedBy: task.claimedBy, attempt: task.attempts, events, cursor,
       truncated: (history[0]?.seq ?? 1) > after + 1, hasMore: (history.at(-1)?.seq ?? 0) > cursor };
   }
 
@@ -461,7 +539,8 @@ export class Store {
     Object.assign(task, patch, { updatedAt: this.#iso() });
     if (patch.status) {
       const message = patch.status === STATUS.PENDING ? 'Lease expired, requeued' :
-        patch.failureReason === FAILURE.LEASE_EXPIRED ? 'Lease expired, attempts exhausted' : patch.status;
+        patch.failureReason === FAILURE.LEASE_EXPIRED ? 'Lease expired, attempts exhausted' :
+        patch.stopRequestedAt ? 'Stop requested' : patch.status;
       this.#record(task, message, task.claimedBy ?? previousOwner);
     }
     if (isTerminal(task.status)) {
@@ -474,6 +553,6 @@ export class Store {
 }
 
 /** Public summary without the (possibly large) payloads. */
-export function summarize({ context: _c, output: _o, files, seq: _s, activity: _a, ...rest }: Task): TaskSummary {
+export function summarize({ context: _c, output: _o, files, seq: _s, activity: _a, directions: _d, ...rest }: Task): TaskSummary {
   return { ...rest, fileCount: files.length };
 }

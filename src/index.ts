@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, type ParseArgsConfig } from 'node:util';
-import { clear, devices, EXIT, hook, list, mcp, serve, wait, worker } from './commands.ts';
+import { clear, dashboard, devices, EXIT, hook, list, mcp, serve, wait, worker } from './commands.ts';
 import { endpoint, loadConfig, roleOf } from './config.ts';
 import { readFile } from 'node:fs/promises';
 import { runDoctor } from './doctor.ts';
@@ -40,12 +40,13 @@ Usage: handover <command>
   wait --objective TEXT         Create a handover and block until an agent completes it
         [--context TEXT | --context-file PATH] [--priority N]
         [--to MACHINE | claude | codex | codex@MACHINE] (paired: handover devices)
-        [--id ID] [--out DIR] [--timeout SEC] [--json]
+        [--id ID] [--out DIR] [--timeout SEC] [--json] [--keyhop-session]
   worker [--with claude|codex | --exec "CMD"]
                                 Take the next handover, pipe its briefing to the agent, repeat (default:
                                 the auto-pickup agent) [--full-access] [--agent NAME] [--lease SEC]
                                 [--interval SEC] [--once]
   list [--status S] [--for AGENT]
+  dashboard                     Print the relay's browser dashboard URL
   clear [ID...] [--all] [--yes] Delete finished handovers, or just these ids (open ones are cancelled).
                                 --all also cancels and deletes every open one
   devices [--json]              The paired machines: online or not, version, agents, what's running.
@@ -76,7 +77,7 @@ const AGENT_FLAGS = { auto: s, 'full-access': b, 'no-claude': b, 'no-codex': b, 
 const OPTIONS: Record<string, ParseArgsConfig['options']> = {
   host: { agent: s, port: s, tunnel: s, ...AGENT_FLAGS },
   setup: { peer: b, relay: b, join: s, token: s, port: s, tunnel: s, agent: s, claude: b, hook: b, 'no-service': b },
-  wait: { objective: s, context: s, 'context-file': s, id: s, to: s, priority: s, out: s, timeout: s, json: b },
+  wait: { objective: s, context: s, 'context-file': s, id: s, to: s, priority: s, out: s, timeout: s, json: b, 'keyhop-session': b },
   worker: { exec: s, with: s, 'full-access': b, agent: s, lease: s, interval: s, once: b },
   auto: { 'full-access': b },
   mcp: { as: s },
@@ -209,7 +210,10 @@ async function main(argv: string[]): Promise<number | null> {
         out: str('out'),
         timeoutSeconds: num(o.timeout, 'timeout'),
         json: o.json === true,
+        keyhopSession: o['keyhop-session'] === true,
       });
+    case 'dashboard':
+      return dashboard(p);
     case 'worker':
       return worker(p, {
         exec: str('exec'),

@@ -30,6 +30,7 @@ const brief = (t: Task | TaskSummary) => ({
   createdAt: t.createdAt,
   claimedBy: t.claimedBy,
   updatedAt: t.updatedAt,
+  ...(t.keyhopSession ? { keyhopSession: true } : {}),
 });
 const toMs = (seconds: number | undefined) => (seconds == null ? undefined : seconds * 1000);
 const leaseSeconds = z.number().int().positive().max(86_400).optional().describe('Lease length in seconds (default set by the relay)');
@@ -45,19 +46,30 @@ export function briefing(task: Task): string {
     '## Context',
     task.context || '(none)',
     '',
-    'For longer work, call handover_progress with this id and a short user-facing milestone as you make progress.',
+    `For longer work, call handover_progress with id "${task.id}" and a short user-facing milestone as you make progress.`,
+    `Call handover_controls with id "${task.id}" and attempt ${task.attempts} before each major step, after long operations and before completion. Keep the returned cursor as after for the next check. Follow any new directions. If status is cancelled, stop work immediately.`,
     '',
     '## When finished',
     `Call the \`handover_complete\` tool with id "${task.id}", your final output, and any files`,
     '(utf8 text, or base64 for binary). Use status "failed" with an explanation if you cannot finish.',
   ];
+  if (task.keyhopSession) {
+    lines.splice(lines.indexOf('## When finished'), 0,
+      '## Local Keyhop approval',
+      'Use Keyhop open_session on this machine with one complete plan for the secret-bearing steps. Use VPNHop session_profile for a VPN HTTP step. Run only the approved steps, and close the session if the task stops or the plan changes. Keep session IDs and credentials out of handover messages, results and files.',
+      '');
+  }
   if (task.leaseExpiresAt)
     lines.push(`Your claim expires at ${task.leaseExpiresAt}; call \`handover_renew\` for long work or the task returns to the queue.`);
   return lines.join('\n');
 }
 
 /** Builds an MCP server whose tools operate on `api` (local store or remote relay) as `agentName`. */
-export function buildMcpServer(api: Api, { agentName = 'mcp-client', instructions }: { agentName?: string; instructions?: string } = {}): McpServer {
+export function buildMcpServer(api: Api, { agentName = 'mcp-client', instructions, interactive = true }: {
+  agentName?: string;
+  instructions?: string;
+  interactive?: boolean;
+} = {}): McpServer {
   const server = new McpServer({ name: 'handover', version: VERSION }, instructions ? { instructions } : undefined);
 
   server.registerTool(
@@ -123,6 +135,22 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client', instruction
   );
 
   server.registerTool(
+    'handover_controls',
+    {
+      title: 'Check for handover directions',
+      description:
+        'Read dashboard directions and check for a stop request for your current claim. Check before each major step, ' +
+        'after long work, and before completion. Use the returned cursor as after for your next check. If cancelled, stop.',
+      inputSchema: {
+        id: z.string(),
+        attempt: z.number().int().positive(),
+        after: z.number().int().nonnegative().default(0),
+      },
+    },
+    safe(async ({ id, attempt, after }) => text(await api.controls(id, agentName, attempt, after)))
+  );
+
+  server.registerTool(
     'handover_devices',
     {
       title: 'List connected devices',
@@ -143,7 +171,7 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client', instruction
       inputSchema: { leaseSeconds },
     },
     safe(async ({ leaseSeconds: s }) => {
-      const task = await api.claimNext({ by: agentName, leaseMs: toMs(s) });
+      const task = await api.claimNext({ by: agentName, leaseMs: toMs(s), interactive });
       return text(task ? briefing(task) : 'Queue is empty.');
     })
   );
@@ -163,7 +191,7 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client', instruction
     safe(async ({ timeoutSeconds = 50, leaseSeconds: s }, extra?: { signal?: AbortSignal }) => {
       const end = Date.now() + timeoutSeconds * 1000;
       for (;;) {
-        const task = await api.claimNext({ by: agentName, leaseMs: toMs(s) });
+        const task = await api.claimNext({ by: agentName, leaseMs: toMs(s), interactive });
         if (task) return text(briefing(task));
         if (Date.now() >= end || extra?.signal?.aborted) return text('No handover yet.');
         await Bun.sleep(Math.min(1000, end - Date.now()));
@@ -200,7 +228,7 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client', instruction
       description: 'Claim a specific pending handover by id and receive its objective and context. Then do the work and call handover_complete.',
       inputSchema: { id: z.string(), leaseSeconds },
     },
-    safe(async ({ id, leaseSeconds: s }) => text(briefing(await api.claim(id, { by: agentName, leaseMs: toMs(s) }))))
+    safe(async ({ id, leaseSeconds: s }) => text(briefing(await api.claim(id, { by: agentName, leaseMs: toMs(s), interactive }))))
   );
 
   server.registerTool(
@@ -268,15 +296,17 @@ export function buildMcpServer(api: Api, { agentName = 'mcp-client', instruction
           .optional()
           .describe('Who may take it. Must be paired: use a name from handover_devices, never a guess. A machine ("pc"), an agent anywhere ("codex", "claude"), or one agent on one machine ("codex@pc"). Default: anyone'),
         priority: z.number().int().min(-1000).max(1000).optional().describe('Higher is picked up first (default 0)'),
+        keyhopSession: z.boolean().optional().describe('Queue for interactive pickup on the machine holding the Keyhop vault. Name that machine in to. Send task intent only, never a session ID or credentials.'),
       },
     },
-    safe(async ({ objective, context, id, to, priority }) => {
-      const t = await api.create({ objective, context, id, to, priority, from: agentName });
+    safe(async ({ objective, context, id, to, priority, keyhopSession }) => {
+      const t = await api.create({ objective, context, id, to, priority, keyhopSession, from: agentName });
       return text({
         id: t.id,
         status: t.status,
         to: t.to,
         priority: t.priority,
+        ...(t.keyhopSession ? { keyhopSession: true, pickup: 'Ask an open MCP client on the target machine to claim this handover.' } : {}),
         follow: `Call handover_follow with id "${t.id}" to show progress in this chat.`,
         whenDone: `To be woken when it finishes, run \`handover wait --id ${t.id} --out handover-${t.id}\` as a background command (Claude Code: Bash with run_in_background): it exits with the output and saves the files. Without background commands, call handover_wait.`,
       });

@@ -19,7 +19,7 @@ export class RelayError extends Error {
 /** HTTP client for a Handover relay. */
 export function httpApi({ url, token }: Endpoint): Api {
   const base = url.replace(/\/+$/, '');
-  async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const res = await fetch(base + path, {
       method,
       headers: {
@@ -27,6 +27,7 @@ export function httpApi({ url, token }: Endpoint): Api {
         ...(body ? { 'content-type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal,
     });
     const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string } | null;
     if (!res.ok) throw new RelayError(data?.error ?? `HTTP ${res.status}`, res.status, data?.code);
@@ -39,11 +40,22 @@ export function httpApi({ url, token }: Endpoint): Api {
     return q ? `?${q}` : '';
   };
   return {
-    create: (input) => call('POST', '/tasks', input),
+    create: async (input) => {
+      if (!input.keyhopSession) return call('POST', '/tasks', input);
+      try {
+        return await call('POST', '/keyhop-session/tasks', input);
+      } catch (error) {
+        if (error instanceof RelayError && error.status === 404 && !error.code)
+          throw new RelayError('Update the Handover host to queue interactive Keyhop sessions.', 404);
+        throw error;
+      }
+    },
     list: ({ status, agent, kind } = {}) => call('GET', `/tasks${query({ status, for: agent, kind })}`),
     get: (id) => call('GET', `/tasks/${enc(id)}`),
-    activity: (id, after) => call('GET', `/tasks/${enc(id)}/activity${query({ after })}`),
+    activity: (id, after, signal) => call('GET', `/tasks/${enc(id)}/activity${query({ after })}`, undefined, signal),
     progress: async (id, input) => void (await call('POST', `/tasks/${enc(id)}/progress`, input)),
+    controls: (id, by, attempt, after) => call('POST', `/tasks/${enc(id)}/controls`, { by, attempt, after }),
+    workerStopped: async (id, by, attempt) => void (await call('POST', `/tasks/${enc(id)}/stopped`, { by, attempt })),
     claim: (id, opts = {}) => call('POST', `/tasks/${enc(id)}/claim`, opts),
     claimNext: (opts = {}) => call<Task | null>('POST', '/tasks/next', opts),
     renew: (id, opts = {}) => call('POST', `/tasks/${enc(id)}/renew`, opts),
@@ -66,6 +78,8 @@ export function localApi(store: Store): Api {
     get: async (id) => store.get(id),
     activity: async (id, after) => store.activity(id, after),
     progress: async (id, input) => store.progress(id, input),
+    controls: async (id, by, attempt, after) => store.controls(id, by, attempt, after),
+    workerStopped: async (id, by, attempt) => store.workerStopped(id, by, attempt),
     claim: async (id, opts) => store.claim(id, opts),
     claimNext: async (opts) => store.claimNext(opts),
     renew: async (id, opts) => store.renew(id, opts),

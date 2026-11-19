@@ -31,14 +31,29 @@ export interface ActivityPage {
   id: string;
   status: TaskStatus;
   claimedBy: string | null;
+  attempt?: number;
   events: ActivityEvent[];
   cursor: number;
   truncated: boolean;
   hasMore: boolean;
 }
 
+export interface Direction {
+  cursor: number;
+  at: string;
+  message: string;
+  deliveredAt?: string;
+}
+
+export interface TaskControls {
+  status: TaskStatus;
+  cursor: number;
+  directions: Direction[];
+}
+
 export interface Task {
   activity?: ActivityEvent[];
+  directions?: Direction[];
   id: string;
   seq: number;
   objective: string;
@@ -55,6 +70,11 @@ export interface Task {
   files: TaskFile[];
   createdAt: string;
   updatedAt: string;
+  keyhopSession?: true;
+  /** Handover launched the claimant and can stop its process. */
+  managed?: boolean;
+  stopRequestedAt?: string;
+  stoppedAt?: string;
   /** Peer mode: agent name of the peer holding this task (set by the client, not stored). */
   peer?: string;
   /** 'ping': a connectivity check answered by handover itself, never shown to agents. */
@@ -64,7 +84,7 @@ export interface Task {
 export const TASK_KINDS = ['task', 'ping'] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
-export type TaskSummary = Omit<Task, 'context' | 'output' | 'files' | 'seq' | 'activity'> & { fileCount: number };
+export type TaskSummary = Omit<Task, 'context' | 'output' | 'files' | 'seq' | 'activity' | 'directions'> & { fileCount: number };
 
 export interface CreateInput {
   id?: string;
@@ -74,6 +94,7 @@ export interface CreateInput {
   to?: string | null;
   priority?: number | string;
   kind?: TaskKind;
+  keyhopSession?: boolean;
 }
 
 export interface ListFilter {
@@ -89,6 +110,10 @@ export interface ClaimOptions {
   leaseMs?: number;
   /** claimNext only; default 'task'. */
   kind?: TaskKind;
+  interactive?: boolean;
+  managed?: boolean;
+  /** Compare against this claim when renewing a managed task. */
+  attempt?: number;
 }
 
 /** A handover process that checked in with the host recently. */
@@ -143,6 +168,8 @@ export interface CompleteInput {
   status?: 'success' | 'failed';
   output?: string;
   files?: Array<{ name: string; content: string; encoding?: FileEncoding }>;
+  /** Compare against a managed claim before reporting an automatic worker result. */
+  claim?: { by: string; attempt: number };
 }
 
 /** What MCP tools and the CLI need from a relay, in-process or over HTTP. */
@@ -154,8 +181,10 @@ export interface Api {
   create(input: CreateInput): Promise<Task>;
   list(filter?: ListFilter): Promise<Array<Task | TaskSummary>>;
   get(id: string): Promise<Task>;
-  activity(id: string, after: number): Promise<ActivityPage>;
+  activity(id: string, after: number, signal?: AbortSignal): Promise<ActivityPage>;
   progress(id: string, input: { by: string; message: string }): Promise<void>;
+  controls(id: string, by: string, attempt: number, after: number): Promise<TaskControls>;
+  workerStopped(id: string, by: string, attempt: number): Promise<void>;
   claim(id: string, opts?: ClaimOptions): Promise<Task>;
   claimNext(opts?: ClaimOptions): Promise<Task | null>;
   renew(id: string, opts?: ClaimOptions): Promise<Task>;

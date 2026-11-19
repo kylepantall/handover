@@ -4,15 +4,17 @@
  * on, by the login service (`serve`) or handover's MCP server.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ADAPTERS } from './agents.ts';
-import { isWindows, type Paths } from './paths.ts';
+import { RelayError } from './client.ts';
+import { isWindows, windowsSystem, type Paths } from './paths.ts';
 import { startResponder } from './responder.ts';
 import { briefing } from './tools.ts';
-import { agentAddress, isTerminal } from './store.ts';
+import { agentAddress, HandoverError } from './store.ts';
 import { STATUS, type AgentKind, type Api, type Task } from './types.ts';
 
 const log = (msg: string, ctx?: Record<string, unknown>) => console.error('[handover]', msg, ...(ctx ? [ctx] : []));
@@ -31,15 +33,34 @@ export const reportsFailure = (output: string): boolean => /^\s*FAILED:/.test(ou
 
 const quoteCmd = (a: string) => (/^[\w./:=@-]+$/.test(a) ? a : `"${a}"`);
 
-export function runAgent(command: AgentCommand, task: Task, cwd?: string): Promise<{ code: number; stdout: string }> {
+function stopAgent(child: ChildProcess): void {
+  if (!child.pid) return;
+  try {
+    if (!isWindows) process.kill(-child.pid, 'SIGKILL');
+    else if (child.exitCode === null && child.signalCode === null) {
+      const result = spawnSync(windowsSystem('taskkill.exe'), ['/T', '/F', '/PID', String(child.pid)], {
+        timeout: 5000, windowsHide: true,
+      });
+      if (result.status !== 0) child.kill('SIGKILL');
+    }
+  } catch {
+    child.kill('SIGKILL');
+  }
+}
+
+export function runAgent(command: AgentCommand, task: Task, cwd?: string, signal?: AbortSignal): Promise<{ code: number; stdout: string }> {
   return new Promise((resolve) => {
+    if (signal?.aborted) return resolve({ code: 1, stdout: '' });
     const env = { ...process.env, HANDOVER_ID: task.id, [WORKER_ENV]: '1' };
     const stdio: ['pipe', 'pipe', 'inherit'] = ['pipe', 'pipe', 'inherit'];
     let child;
-    if (typeof command === 'string') child = spawn(command, { shell: true, stdio, env, cwd });
+    const options = { stdio, env, cwd, detached: !isWindows, windowsHide: true };
+    if (typeof command === 'string') child = spawn(command, { ...options, shell: true });
     // npm installs agents on Windows as .cmd shims, which only run through cmd.
-    else if (isWindows && /\.(cmd|bat)$/i.test(command[0]!)) child = spawn(command.map(quoteCmd).join(' '), { shell: true, stdio, env, cwd });
-    else child = spawn(command[0]!, command.slice(1), { stdio, env, cwd });
+    else if (isWindows && /\.(cmd|bat)$/i.test(command[0]!)) child = spawn(command.map(quoteCmd).join(' '), { ...options, shell: true });
+    else child = spawn(command[0]!, command.slice(1), options);
+    const stop = () => stopAgent(child);
+    signal?.addEventListener('abort', stop, { once: true });
     let stdout = '';
     child.stdout!.on('data', (d: Buffer) => {
       stdout += d;
@@ -47,8 +68,14 @@ export function runAgent(command: AgentCommand, task: Task, cwd?: string): Promi
     });
     child.stdin!.on('error', () => {}); // the agent may exit before reading it all
     child.stdin!.end(briefing(task) + (typeof command === 'string' ? '' : UNATTENDED));
-    child.on('close', (code) => resolve({ code: code ?? 1, stdout }));
-    child.on('error', (err) => resolve({ code: -1, stdout: err.message }));
+    child.on('close', (code) => {
+      signal?.removeEventListener('abort', stop);
+      resolve({ code: code ?? 1, stdout });
+    });
+    child.on('error', (err) => {
+      signal?.removeEventListener('abort', stop);
+      resolve({ code: -1, stdout: err.message });
+    });
   });
 }
 
@@ -71,7 +98,8 @@ export async function workLoop(api: Api, o: WorkOptions, signal?: AbortSignal): 
     while (!signal?.aborted) {
       try {
         let task: Task | null;
-        while (!signal?.aborted && (task = await api.claimNext({ by: o.agent, leaseMs: o.leaseMs }))) await runOne(api, task, o);
+        while (!signal?.aborted && (task = await api.claimNext({ by: o.agent, leaseMs: o.leaseMs, managed: true })))
+          await runOne(api, task, o, signal);
         if (failing) log('relay reachable again');
         failing = false;
       } catch (err) {
@@ -87,23 +115,76 @@ export async function workLoop(api: Api, o: WorkOptions, signal?: AbortSignal): 
   }
 }
 
-async function runOne(api: Api, t: Task, o: WorkOptions): Promise<void> {
+const sameClaim = (t: Task, current: { claimedBy: string | null; attempt?: number }) =>
+  t.claimedBy === current.claimedBy && (current.attempt === undefined || t.attempts === current.attempt);
+
+const missingTask = (error: unknown) =>
+  (error instanceof RelayError || error instanceof HandoverError) && error.code === 'not_found';
+
+async function claimStatus(api: Api, id: string, signal: AbortSignal) {
+  try {
+    return await api.activity(id, Number.MAX_SAFE_INTEGER, signal);
+  } catch (error) {
+    if (!(error instanceof RelayError) || error.status !== 404 || error.code) throw error;
+    // Relays from before the activity endpoint still accept managed workers.
+    const task = await api.get(id);
+    return { claimedBy: task.claimedBy, status: task.status, attempt: task.attempts };
+  }
+}
+
+async function observeClaim(api: Api, task: Task, stop: AbortController, finished: AbortSignal): Promise<void> {
+  while (!finished.aborted) {
+    try {
+      const current = await claimStatus(api, task.id, AbortSignal.any([finished, AbortSignal.timeout(2500)]));
+      if (!sameClaim(task, current) || current.status === STATUS.CANCELLED || current.status === STATUS.PENDING) {
+        stop.abort();
+        return;
+      }
+    } catch (error) {
+      if (missingTask(error)) {
+        stop.abort();
+        return;
+      }
+    }
+    await delay(1000, undefined, { signal: finished }).catch(() => {});
+  }
+}
+
+async function runOne(api: Api, t: Task, o: WorkOptions, signal?: AbortSignal): Promise<void> {
   log('picked up', { id: t.id, priority: t.priority, attempt: t.attempts });
-  // Keep the lease alive while the agent runs: renew at a third of its length.
-  const leaseLeft = Date.parse(t.leaseExpiresAt ?? '') - Date.now();
-  const renewer = setInterval(() => {
-    api.renew(t.id, { by: o.agent, leaseMs: o.leaseMs }).catch((err: Error) => log('renew failed', { id: t.id, error: err.message }));
-  }, Math.max(1000, leaseLeft / 3));
   let cwd: string | undefined;
   if (o.workDir) {
     cwd = path.join(o.workDir, t.id);
     await mkdir(cwd, { recursive: true });
   }
-  const { code, stdout } = await runAgent(o.command, t, cwd).finally(() => clearInterval(renewer));
-  if (!isTerminal((await api.get(t.id)).status)) {
+  const stop = new AbortController();
+  const finished = new AbortController();
+  const observer = observeClaim(api, t, stop, finished.signal);
+  // Keep the lease alive while the agent runs: renew at a third of its length.
+  const leaseLeft = Date.parse(t.leaseExpiresAt ?? '') - Date.now();
+  const renewer = setInterval(() => {
+    api.renew(t.id, { by: o.agent, leaseMs: o.leaseMs, attempt: t.attempts }).catch((err: Error) => log('renew failed', { id: t.id, error: err.message }));
+  }, Math.max(1000, leaseLeft / 3));
+  const running = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
+  const { code, stdout } = await runAgent(o.command, t, cwd, running).finally(async () => {
+    clearInterval(renewer);
+    finished.abort();
+    await observer;
+  });
+  const active = await claimStatus(api, t.id, AbortSignal.timeout(5000)).catch((error: unknown) => {
+    if (missingTask(error)) return null;
+    throw error;
+  });
+  if (active && sameClaim(t, active) && active.status === STATUS.CANCELLED && t.managed) {
+    await api.workerStopped(t.id, o.agent, t.attempts);
+  } else if (active && sameClaim(t, active) && active.status === STATUS.CLAIMED && !running.aborted) {
     // The agent didn't call handover_complete itself: hand back its stdout.
     const failed = code !== 0 || reportsFailure(stdout);
-    await api.complete(t.id, { status: failed ? STATUS.FAILED : STATUS.SUCCESS, output: stdout.trim() });
+    await api.complete(t.id, {
+      status: failed ? STATUS.FAILED : STATUS.SUCCESS,
+      output: stdout.trim(),
+      claim: { by: o.agent, attempt: t.attempts },
+    });
   }
   log('finished', { id: t.id, exitCode: code });
 }

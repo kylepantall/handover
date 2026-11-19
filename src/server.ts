@@ -5,6 +5,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Store, HandoverError, summarize, type ErrorCode } from './store.ts';
 import { localApi } from './client.ts';
+import { serveDashboard } from './dashboard.ts';
 import { buildMcpServer } from './tools.ts';
 import type { TaskKind, TaskStatus, Tunnel } from './types.ts';
 
@@ -15,7 +16,7 @@ const HTTP_STATUS: Record<ErrorCode, number> = { bad_request: 400, not_found: 40
 const digest = (s: string) => createHash('sha256').update(s).digest();
 
 function send(res: ServerResponse, code: number, body: unknown): void {
-  res.writeHead(code, { 'content-type': 'application/json' });
+  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(body));
 }
 
@@ -56,9 +57,9 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
   const expected = digest(token);
   const api = localApi(store);
 
-  const authorized = (req: IncomingMessage, url: URL) => {
+  const authorized = (req: IncomingMessage, url: URL, headerOnly = false) => {
     const header = req.headers.authorization ?? '';
-    const given = header.startsWith('Bearer ') ? header.slice(7) : url.searchParams.get('token');
+    const given = header.startsWith('Bearer ') ? header.slice(7) : headerOnly ? null : url.searchParams.get('token');
     return given != null && timingSafeEqual(digest(given), expected);
   };
 
@@ -92,7 +93,23 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
 
     if (url.pathname === '/health') return send(res, 200, { ok: true });
-    if (!authorized(req, url)) return send(res, 401, { error: 'unauthorized' });
+    if (req.method === 'GET' && serveDashboard(url.pathname, res)) return;
+    const controls = parts[0] === 'tasks' && ['direct', 'stop', 'controls', 'stopped'].includes(parts[2] ?? '');
+    if (!authorized(req, url, parts[0] === 'dashboard' || controls)) return send(res, 401, { error: 'unauthorized' });
+    if (url.pathname === '/dashboard/overview' && req.method === 'GET')
+      return send(res, 200, { tasks: store.list().map(summarize), agents: store.agents({ all: true }) });
+    if (parts[0] === 'dashboard' && parts[1] === 'task' && parts.length === 3 && req.method === 'GET') {
+      const task = store.get(parts[2]!);
+      return send(res, 200, {
+        task: summarize(task),
+        activity: store.activity(task.id, Number(url.searchParams.get('after') ?? 0)),
+        directions: task.directions ?? [],
+        output: task.output?.slice(0, 64_000),
+        outputTruncated: (task.output?.length ?? 0) > 64_000,
+      });
+    }
+    if (url.pathname === '/keyhop-session/tasks' && req.method === 'POST')
+      return send(res, 201, store.create({ ...(await readJson(req) as any), keyhopSession: true }));
     if (parts[0] === 'mcp' && parts.length === 1) return handleMcp(req, res, url);
     if (parts[0] === 'agents' && parts.length === 1) {
       if (req.method === 'POST') {
@@ -123,6 +140,24 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
     if (id && action === 'activity' && m === 'GET') return send(res, 200, store.activity(id, Number(q.get('after') ?? 0)));
     if (id && action === 'progress' && m === 'POST') {
       store.progress(id, (await readJson(req)) as { by: string; message: string });
+      return send(res, 200, { ok: true });
+    }
+    if (id && action === 'direct' && m === 'POST') {
+      const { attempt, message } = await readJson(req);
+      store.direct(id, attempt, message);
+      return send(res, 200, { ok: true });
+    }
+    if (id && action === 'stop' && m === 'POST') {
+      const { attempt } = await readJson(req);
+      return send(res, 200, summarize(store.stop(id, attempt)));
+    }
+    if (id && action === 'controls' && m === 'POST') {
+      const { by, attempt, after } = await readJson(req);
+      return send(res, 200, store.controls(id, by, attempt, after));
+    }
+    if (id && action === 'stopped' && m === 'POST') {
+      const { by, attempt } = await readJson(req);
+      store.workerStopped(id, by, attempt);
       return send(res, 200, { ok: true });
     }
     if (id && action === 'claim' && m === 'POST') return send(res, 200, store.claim(id, await readJson(req)));
