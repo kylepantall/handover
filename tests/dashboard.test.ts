@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { httpApi } from '../src/client.ts';
@@ -27,7 +28,7 @@ test('dashboard token protects data and an interactive handover receives directi
     const dashboard = await fetch(app.base + '/dashboard');
     expect(dashboard.status).toBe(200);
     const html = await dashboard.text();
-    expect(html).toContain('Connect to your relay');
+    expect(html).toContain('Sign in to Handover');
     expect(html).not.toContain(token);
     expect(dashboard.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
     expect((await fetch(app.base + '/dashboard/overview?token=' + token)).status).toBe(401);
@@ -97,3 +98,92 @@ test('force stop terminates a managed worker and the relay records its exit', as
     await rm(temp, { recursive: true, force: true });
   }
 }, 10000);
+
+const dashboardHeaders = { 'content-type': 'application/json', 'x-handover-dashboard': '1' };
+const browserPost = (base: string, path: string, body: unknown, cookie?: string, extra?: Record<string, string>) =>
+  fetch(base + path, {
+    method: 'POST',
+    headers: { ...dashboardHeaders, ...extra, ...(cookie ? { cookie } : {}) },
+    body: JSON.stringify(body),
+  });
+
+async function signIn(base: string): Promise<string> {
+  const response = await browserPost(base, '/dashboard/login', { token });
+  expect(response.status).toBe(200);
+  const setCookie = response.headers.get('set-cookie')!;
+  expect(setCookie).toContain('HttpOnly; SameSite=Strict');
+  expect(setCookie).not.toContain(token);
+  return setCookie.split(';')[0]!;
+}
+
+test('an unauthorized browser can sign in from the relay root and revoke its session', async () => {
+  const app = await setup();
+  try {
+    const root = await fetch(app.base + '/');
+    expect(root.url).toBe(app.base + '/dashboard');
+    expect(await root.text()).toContain('Sign in to Handover');
+    const url = app.base + '/dashboard/overview';
+    expect((await fetch(url)).status).toBe(401);
+    expect((await browserPost(app.base, '/dashboard/login', { token: 'wrong' })).status).toBe(401);
+    expect((await fetch(app.base + '/dashboard/login', { method: 'POST', body: JSON.stringify({ token }) })).status).toBe(403);
+    const cookie = await signIn(app.base);
+    expect((await fetch(url, { headers: { cookie } })).status).toBe(200);
+    expect((await fetch(app.base + '/tasks', { headers: { cookie } })).status).toBe(401);
+    expect((await browserPost(app.base, '/dashboard/logout', {}, cookie)).status).toBe(200);
+    expect((await fetch(url, { headers: { cookie } })).status).toBe(401);
+  } finally {
+    app.close();
+  }
+});
+
+const liveAgent = fileURLToPath(new URL('./fixtures/live-agent.ts', import.meta.url));
+
+for (const kind of ['codex', 'claude'] as const) {
+  test(`${kind} streams visible messages and receives dashboard input through its running conversation`, async () => {
+    const app = await setup();
+    const controller = new AbortController();
+    const streamStop = new AbortController();
+    let worker: Promise<void> | undefined;
+    try {
+      const task = app.store.create({ objective: 'Wait for direct input' });
+      worker = workLoop(app.api, {
+        agent: `${kind}@worker`, command: [process.execPath, liveAgent, kind, 'wait'],
+        native: { kind, fullAccess: false }, once: true,
+      }, controller.signal);
+      const route = '/dashboard/task/' + task.id;
+      expect((await fetch(app.base + route + '/transcript')).status).toBe(401);
+      const cookie = await signIn(app.base);
+      const response = await fetch(app.base + route + '/transcript', {
+        headers: { cookie }, signal: AbortSignal.any([AbortSignal.timeout(5000), streamStop.signal]),
+      });
+      expect(response.headers.get('content-type')).toContain('text/event-stream');
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let transcript = '';
+      async function waitFor(text: string) {
+        while (!transcript.includes(text)) {
+          const next = await reader.read();
+          if (next.done) throw new Error('Transcript ended early');
+          transcript += decoder.decode(next.value, { stream: true });
+        }
+      }
+      await waitFor('Agent is working.');
+      expect(app.store.get(task.id).status).toBe('claimed');
+      expect((await browserPost(app.base, route + '/direct', { attempt: 2, message: 'stale' }, cookie)).status).toBe(409);
+      expect((await browserPost(app.base, route + '/direct', { attempt: 1, message: 'Use staging' }, cookie)).status).toBe(200);
+      expect((await app.api.controls(task.id, `${kind}@worker`, 1, 0)).directions).toEqual([]);
+      await waitFor('Received: Use staging');
+      await worker;
+      expect(app.store.get(task.id)).toMatchObject({ status: 'success', output: 'Received: Use staging' });
+      expect(app.store.get(task.id).directions?.[0]?.deliveredAt).toBeDefined();
+      expect(transcript).not.toContain('private reasoning');
+      expect(transcript.match(/Agent is working\./g)).toHaveLength(1);
+      await reader.cancel();
+    } finally {
+      streamStop.abort();
+      controller.abort();
+      await worker?.catch(() => {});
+      app.close();
+    }
+  }, 12000);
+}

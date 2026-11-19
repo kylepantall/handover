@@ -1,10 +1,10 @@
 const byId = (id) => document.getElementById(id);
 const ui = Object.fromEntries([
-  'connection', 'login', 'login-form', 'login-error', 'token', 'dashboard', 'lock',
+  'connection', 'login', 'login-form', 'login-error', 'token', 'dashboard', 'lock', 'sign-in',
   'agents', 'tasks', 'queue-count', 'empty-detail', 'task-detail', 'task-title', 'task-status',
   'task-meta', 'activity', 'result', 'result-output', 'result-files', 'controls', 'control-note',
   'directions', 'direct-form', 'direction', 'send-direction', 'stop', 'stop-confirm', 'stop-description',
-  'control-error',
+  'control-error', 'direction-label', 'transcript', 'transcript-empty', 'stream-status',
 ].map((id) => [id, byId(id)]));
 
 const labels = { pending: 'Queued', claimed: 'Running', success: 'Completed', failed: 'Failed', cancelled: 'Stopped' };
@@ -12,7 +12,7 @@ const clock = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-d
 const open = (task) => task.status === 'pending' || task.status === 'claimed';
 const isStopping = (task) => task.status === 'cancelled' && task.managed && task.stopRequestedAt && !task.stoppedAt;
 const statusLabel = (task) => isStopping(task) ? 'Stopping' : (labels[task.status] ?? task.status);
-const taskPath = (id) => '/tasks/' + encodeURIComponent(id);
+const taskPath = (id) => '/dashboard/task/' + encodeURIComponent(id);
 let connection;
 let snapshot = { tasks: [], agents: [] };
 let scope = '';
@@ -22,6 +22,9 @@ let current;
 let cursor = 0;
 let busy = false;
 let stopping;
+let stream;
+let lastMessage;
+let directions = [];
 const views = new WeakMap();
 
 function element(tag, content, className) {
@@ -77,15 +80,14 @@ async function request(conn, path, body) {
   const response = await fetch(path, {
     method: body ? 'POST' : 'GET',
     headers: {
-      Authorization: 'Bearer ' + conn.token,
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...(body ? { 'Content-Type': 'application/json', 'X-Handover-Dashboard': '1' } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.any([conn.stop.signal, AbortSignal.timeout(8000)]),
   });
-  if (response.status === 401) {
-    if (connection === conn) clearConnection('That token did not match the relay.');
-    throw new Error('The relay rejected the token.');
+  if (response.status === 401 && path !== '/dashboard/login') {
+    if (connection === conn) clearConnection(conn.signedIn ? 'Your session ended. Sign in again.' : '');
+    throw new Error('Sign in to the Handover dashboard.');
   }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
@@ -149,18 +151,95 @@ function renderOverview() {
 }
 
 function select(id) {
+  stream?.close();
+  stream = undefined;
+  lastMessage = undefined;
+  directions = [];
   selected = id;
   current = undefined;
   cursor = 0;
   ui['task-detail'].hidden = true;
   ui['empty-detail'].hidden = false;
-  ui['empty-detail'].textContent = id ? 'Loading handover…' : 'Select a handover to see its activity.';
+  ui['empty-detail'].textContent = id ? 'Loading handover…' : 'Select a handover to follow its work.';
   ui.activity.replaceChildren();
+  ui.transcript.replaceChildren();
+  ui['transcript-empty'].hidden = false;
+  ui['stream-status'].hidden = true;
   ui.directions.replaceChildren();
   ui['result-output'].textContent = '';
   views.delete(ui.directions);
   ui.direction.value = '';
   showError(ui['control-error']);
+}
+
+function streamStatus(text, live = false) {
+  const status = ui['stream-status'];
+  status.hidden = !text;
+  if (status.textContent !== text) status.textContent = text;
+  status.classList.toggle('is-live', live);
+}
+
+function renderInputReceipts() {
+  for (const item of ui.transcript.querySelectorAll('[data-direction]')) {
+    const activeAttempt = Number(item.dataset.attempt) === current?.attempts;
+    const receipt = activeAttempt && directions.find((event) => String(event.cursor) === item.dataset.direction);
+    const state = receipt?.deliveredAt ? 'Sent to agent' : receipt?.failedAt ? 'Delivery failed' :
+      activeAttempt && current?.status === 'claimed' ? 'Queued' : 'Task ended before delivery was confirmed';
+    const label = item.querySelector('small');
+    if (label.textContent !== state) label.textContent = state;
+  }
+}
+
+function addTranscript(page) {
+  const panel = ui.transcript.parentElement;
+  const follow = panel.scrollHeight - panel.clientHeight - panel.scrollTop < 48;
+  if (page.truncated) {
+    ui.transcript.append(element('li', 'Earlier messages are outside the retained window.', 'muted'));
+    lastMessage = undefined;
+  }
+  for (const entry of page.events) {
+    const key = [entry.attempt, entry.role, entry.messageId].join('/');
+    if (lastMessage?.key === key) {
+      lastMessage.text.textContent = (lastMessage.text.textContent + entry.text).slice(-192000);
+      continue;
+    }
+    const item = element('li', undefined, 'transcript-item');
+    item.dataset.role = entry.role;
+    const speaker = entry.role === 'user' ? 'You' : 'Agent';
+    const text = element('p', entry.text);
+    item.append(element('strong', speaker), text);
+    if (entry.direction != null) {
+      item.dataset.direction = String(entry.direction);
+      item.dataset.attempt = String(entry.attempt);
+      item.append(element('small'));
+    }
+    ui.transcript.append(item);
+    lastMessage = { key, text };
+  }
+  while (ui.transcript.children.length > 256) ui.transcript.firstElementChild.remove();
+  ui['transcript-empty'].hidden = ui.transcript.children.length > 0;
+  renderInputReceipts();
+  if (follow) panel.scrollTop = panel.scrollHeight;
+}
+
+function watchTranscript(task) {
+  if (!task.managed) return;
+  if (stream) {
+    if (stream.readyState === EventSource.OPEN) streamStatus(task.status === 'claimed' ? 'Live' : 'Recent messages', task.status === 'claimed');
+    return;
+  }
+  streamStatus('Connecting…');
+  const source = new EventSource(taskPath(task.id) + '/transcript');
+  stream = source;
+  source.onopen = () => {
+    if (stream === source) streamStatus(current?.status === 'claimed' ? 'Live' : 'Recent messages', current?.status === 'claimed');
+  };
+  source.addEventListener('transcript', (event) => {
+    if (stream === source) addTranscript(JSON.parse(event.data));
+  });
+  source.onerror = () => {
+    if (stream === source) streamStatus('Reconnecting…');
+  };
 }
 
 function addEvents(page) {
@@ -185,7 +264,8 @@ function setActions() {
 }
 
 function renderDetail(data) {
-  const { task, directions, activity } = data;
+  const { task, activity } = data;
+  directions = data.directions;
   current = task;
   ui['empty-detail'].hidden = true;
   ui['task-detail'].hidden = false;
@@ -194,18 +274,25 @@ function renderDetail(data) {
   ui['task-status'].dataset.state = task.status;
   ui['task-meta'].textContent = [task.id, task.claimedBy ?? task.to, task.attempts && 'Attempt ' + task.attempts,
     task.keyhopSession && 'Local Keyhop approval'].filter(Boolean).join(' · ');
+  ui['transcript-empty'].textContent = task.managed
+    ? (task.status === 'claimed' ? 'Waiting for the agent to speak…' : 'There are no retained messages for this task.')
+    : (task.status === 'pending' ? 'A transcript will appear when a worker starts.' : 'See Activity for updates from this external chat.');
+  watchTranscript(task);
+  renderInputReceipts();
   addEvents(activity);
   ui.result.hidden = !data.output && !task.fileCount;
   ui['result-output'].hidden = !data.output;
   ui['result-output'].textContent = (data.output ?? '') + (data.outputTruncated ? '\n\n[Output truncated]' : '');
   ui['result-files'].textContent = task.fileCount ? task.fileCount + ' attached ' + (task.fileCount === 1 ? 'file' : 'files') : '';
   ui.controls.hidden = task.status !== 'claimed' && !task.stopRequestedAt && directions.length === 0;
+  ui['direction-label'].textContent = task.liveInput ? 'Message to agent' : 'Direction for the agent';
+  ui['send-direction'].textContent = task.liveInput ? 'Send message' : 'Send direction';
   ui.stop.textContent = task.managed ? 'Force stop' : 'Request stop';
   ui['control-note'].textContent = task.stoppedAt ? 'Worker process stopped.' :
     isStopping(task) ? 'Waiting for the worker to confirm that its process stopped.' :
     task.stopRequestedAt ? 'Stop recorded. The external agent sees it at its next check-in.' :
-    task.status === 'claimed' ? 'Directions arrive when the agent checks for updates.' : '';
-  renderWhenChanged(ui.directions, [directions, task.status], () => directions.map((direction) => {
+    task.status === 'claimed' && !task.liveInput ? 'Directions arrive when the agent checks for updates.' : '';
+  renderWhenChanged(ui.directions, [directions, task.status, task.liveInput], () => (task.liveInput ? [] : directions).map((direction) => {
     const item = element('li');
     const state = direction.deliveredAt ? 'Read by agent' : open(task) ? 'Waiting for agent' : 'Unread when task ended';
     item.append(element('p', direction.message), element('small', state + ' · ' + clock.format(new Date(direction.at))));
@@ -224,7 +311,7 @@ async function loadDetail(conn) {
   try {
     let more;
     do {
-      const data = await request(conn, '/dashboard/task/' + encodeURIComponent(id) + '?after=' + cursor);
+      const data = await request(conn, taskPath(id) + '?after=' + cursor);
       if (connection !== conn || selected !== id || conn.detail !== marker) return;
       renderDetail(data);
       more = data.activity.hasMore;
@@ -243,6 +330,7 @@ async function refresh(conn) {
     const data = await request(conn, '/dashboard/overview');
     if (connection !== conn) return;
     snapshot = data;
+    conn.signedIn = true;
     ui.login.hidden = true;
     ui.dashboard.hidden = false;
     ui.lock.hidden = false;
@@ -262,19 +350,40 @@ async function poll(conn) {
   if (connection === conn) setTimeout(() => void poll(conn), 1600);
 }
 
-ui['login-form'].addEventListener('submit', (event) => {
+ui['login-form'].addEventListener('submit', async (event) => {
   event.preventDefault();
   const token = ui.token.value.trim();
   if (!token) return;
   connection?.stop.abort();
-  connection = { token, stop: new AbortController() };
+  const conn = { stop: new AbortController() };
+  connection = conn;
   ui.token.value = '';
   showError(ui['login-error']);
   connectionStatus('Connecting', false);
-  void poll(connection);
+  ui['sign-in'].disabled = true;
+  try {
+    await request(conn, '/dashboard/login', { token });
+    if (connection === conn) void poll(conn);
+  } catch (error) {
+    if (connection === conn) clearConnection(error.message);
+  } finally {
+    ui['sign-in'].disabled = false;
+  }
 });
 
-ui.lock.addEventListener('click', () => clearConnection());
+ui.lock.addEventListener('click', async () => {
+  const conn = connection;
+  if (!conn) return;
+  ui.lock.disabled = true;
+  try {
+    await request(conn, '/dashboard/logout', {});
+    if (connection === conn) clearConnection();
+  } catch {
+    if (connection === conn) connectionStatus('Sign-out failed', false);
+  } finally {
+    ui.lock.disabled = false;
+  }
+});
 for (const button of document.querySelectorAll('[data-filter]')) {
   button.addEventListener('click', () => {
     filter = button.dataset.filter;
@@ -325,3 +434,6 @@ ui['stop-confirm'].addEventListener('close', () => {
   if (stopping && ui['stop-confirm'].returnValue === 'stop') void control(stopping, 'stop');
   stopping = undefined;
 });
+
+connection = { stop: new AbortController() };
+void poll(connection);

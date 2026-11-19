@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { replaceFileSync } from './paths.ts';
+import { Transcripts } from './transcript.ts';
 import { FAILURE,
   STATUS,
   type AgentPresence,
@@ -11,6 +12,7 @@ import { FAILURE,
   type CompleteInput,
   type CreateInput,
   type TaskControls,
+  type WorkerUpdate,
   type ListFilter,
   type Task,
   type TaskFile,
@@ -108,6 +110,7 @@ export interface StoreOptions {
  */
 export class Store {
   #tasks = new Map<string, Task>();
+  #transcripts = new Transcripts();
   /** Paired names. `direct`: its own process last checked in (agent addresses a machine reports have none). */
   #presence = new Map<string, { beat: Heartbeat; seen: number; direct: number; saved: number; via: Map<string, number> }>();
   #waiters = new Map<string, Set<(t: Task) => void>>();
@@ -181,7 +184,7 @@ export class Store {
     return task;
   }
 
-  claim(id: string, { by = null, leaseMs, interactive, managed }: ClaimOptions = {}): Task {
+  claim(id: string, { by = null, leaseMs, interactive, managed, liveInput }: ClaimOptions = {}): Task {
     const task = this.get(id);
     const agent = validateAgent(by);
     if (task.status !== STATUS.PENDING) throw new HandoverError('conflict', 'task is not pending');
@@ -194,6 +197,7 @@ export class Store {
       attempts: task.attempts + 1,
       leaseExpiresAt: this.#leaseUntil(leaseMs),
       managed: managed === true ? true : undefined,
+      liveInput: managed === true && liveInput === true ? true : undefined,
       directions: undefined,
       stopRequestedAt: undefined,
       stoppedAt: undefined,
@@ -201,11 +205,11 @@ export class Store {
   }
 
   /** Atomically claims the highest-priority eligible pending task, or returns null. */
-  claimNext({ by = null, leaseMs, kind = 'task', interactive, managed }: ClaimOptions = {}): Task | null {
+  claimNext({ by = null, leaseMs, kind = 'task', interactive, managed, liveInput }: ClaimOptions = {}): Task | null {
     const agent = validateAgent(by);
     const next = this.list({ status: STATUS.PENDING, agent: agent ?? '', kind })
       .find((task) => !task.keyhopSession || (interactive === true && managed !== true));
-    return next ? this.claim(next.id, { by: agent, leaseMs, interactive, managed }) : null;
+    return next ? this.claim(next.id, { by: agent, leaseMs, interactive, managed, liveInput }) : null;
   }
 
   /** Extends the lease of a task claimed by `by`. */
@@ -258,7 +262,11 @@ export class Store {
     const directions = task.directions ??= [];
     if (directions.length >= 32) throw new HandoverError('conflict', 'this claim already has 32 directions');
     const at = this.#iso();
-    directions.push({ cursor: directions.length + 1, at, message: message.trim() });
+    const direction = { cursor: directions.length + 1, at, message: message.trim() };
+    directions.push(direction);
+    if (task.liveInput) this.#transcripts.append(id, [{
+      attempt, role: 'user', messageId: `input-${direction.cursor}`, text: direction.message, direction: direction.cursor,
+    }]);
     task.updatedAt = at;
     this.#record(task, 'Direction sent to agent', null);
     this.#changed();
@@ -270,7 +278,7 @@ export class Store {
       throw new HandoverError('conflict', 'only the current claimant may read these directions');
     if (!Number.isSafeInteger(after) || after < 0) throw new HandoverError('bad_request', 'invalid direction cursor');
     if (task.status !== STATUS.CLAIMED) return { status: task.status, cursor: after, directions: [] };
-    const directions = (task.directions ?? []).filter((entry) => entry.cursor > after);
+    const directions = task.liveInput ? [] : (task.directions ?? []).filter((entry) => entry.cursor > after);
     const unread = directions.filter((entry) => entry.deliveredAt === undefined);
     if (unread.length) {
       task.updatedAt = this.#iso();
@@ -279,6 +287,41 @@ export class Store {
       this.#changed();
     }
     return { status: task.status, cursor: directions.at(-1)?.cursor ?? after, directions };
+  }
+
+  transcript(id: string, after: number) {
+    this.get(id);
+    if (!Number.isSafeInteger(after) || after < 0) throw new HandoverError('bad_request', 'invalid transcript cursor');
+    return this.#transcripts.page(id, after);
+  }
+
+  workerUpdate(id: string, { by, attempt, chunks, receipts }: WorkerUpdate) {
+    const task = this.get(id);
+    if (!task.managed || !by || task.claimedBy !== validateAgent(by) || task.attempts !== attempt)
+      throw new HandoverError('conflict', 'this worker no longer holds the task');
+    if (!Array.isArray(chunks) || chunks.length > 32 || chunks.some((chunk) =>
+      !chunk || !Number.isSafeInteger(chunk.seq) || chunk.seq <= 0 ||
+      typeof chunk.messageId !== 'string' || !chunk.messageId || chunk.messageId.length > 128 ||
+      typeof chunk.text !== 'string' || !chunk.text || chunk.text.length > 4096))
+      throw new HandoverError('bad_request', 'invalid transcript chunks');
+    if (!Array.isArray(receipts) || receipts.length > 32 || receipts.some((receipt) =>
+      !receipt || !Number.isSafeInteger(receipt.cursor) || receipt.cursor <= 0 || typeof receipt.accepted !== 'boolean'))
+      throw new HandoverError('bad_request', 'invalid input receipts');
+
+    if (task.status !== STATUS.CANCELLED && task.status !== STATUS.PENDING)
+      this.#transcripts.worker(id, attempt, chunks);
+    let changed = false;
+    for (const receipt of receipts) {
+      const direction = task.directions?.find((entry) => entry.cursor === receipt.cursor);
+      if (!task.liveInput || !direction || direction.deliveredAt || direction.failedAt) continue;
+      if (receipt.accepted) direction.deliveredAt = this.#iso();
+      else direction.failedAt = this.#iso();
+      changed = true;
+    }
+    if (changed) this.#changed();
+    const directions = task.status === STATUS.CLAIMED && task.liveInput
+      ? (task.directions ?? []).filter((entry) => !entry.deliveredAt && !entry.failedAt) : [];
+    return { status: task.status, directions };
   }
 
   workerStopped(id: string, by: string, attempt: number): void {
@@ -306,6 +349,7 @@ export class Store {
       if (kindOf(task) === 'ping' || (!all && !isTerminal(task.status))) continue;
       if (!isTerminal(task.status)) this.#update(task, { status: STATUS.CANCELLED, leaseExpiresAt: null });
       this.#tasks.delete(task.id);
+      this.#transcripts.delete(task.id);
       removed++;
     }
     if (removed) this.#changed();
@@ -317,6 +361,7 @@ export class Store {
     const task = this.get(id);
     if (!isTerminal(task.status)) this.#update(task, { status: STATUS.CANCELLED, leaseExpiresAt: null });
     this.#tasks.delete(id);
+    this.#transcripts.delete(id);
     this.#changed();
     return task;
   }
@@ -339,10 +384,11 @@ export class Store {
         if (task.attempts >= this.#maxAttempts) {
           this.#update(task, { status: STATUS.FAILED, failureReason: FAILURE.LEASE_EXPIRED, leaseExpiresAt: null });
         } else {
-          this.#update(task, { status: STATUS.PENDING, claimedBy: null, leaseExpiresAt: null, managed: undefined, directions: undefined });
+          this.#update(task, { status: STATUS.PENDING, claimedBy: null, leaseExpiresAt: null, managed: undefined, liveInput: undefined, directions: undefined });
         }
       } else if (isTerminal(task.status) && now - Date.parse(task.updatedAt) > this.#retentionMs) {
         this.#tasks.delete(task.id);
+        this.#transcripts.delete(task.id);
         this.#changed();
       }
     }

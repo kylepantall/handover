@@ -13,17 +13,17 @@
     <a href="/dashboard" class="wordmark">Handover</a>
     <div class="connection">
       <span class="connection-status" role="status" id="connection">Locked</span>
-      <button class="subtle" type="button" id="lock" hidden>Lock</button>
+      <button class="subtle" type="button" id="lock" hidden>Sign out</button>
     </div>
   </header>
   <main>
     <section class="login" id="login" aria-labelledby="login-title">
-      <h1 id="login-title">Connect to your relay</h1>
+      <h1 id="login-title">Sign in to Handover</h1>
       <p>Enter the token from <code>handover token</code> to view tasks and control running agents.</p>
       <form id="login-form">
         <label for="token">Relay token</label>
         <input type="password" autocomplete="off" spellcheck="false" id="token" required>
-        <button class="primary" type="submit">Connect</button>
+        <button class="primary" id="sign-in" type="submit">Sign in</button>
         <p class="error" id="login-error" role="alert" hidden></p>
       </form>
     </section>
@@ -45,35 +45,44 @@
         <ul class="task-list" id="tasks"></ul>
       </section>
       <section class="detail" aria-label="Selected handover">
-        <div id="empty-detail" class="empty-detail">Select a handover to see its activity.</div>
+        <div id="empty-detail" class="empty-detail">Select a handover to follow its work.</div>
         <article id="task-detail" hidden>
           <header class="task-header">
             <p id="task-status" class="state"></p>
             <h2 id="task-title"></h2>
             <div id="task-meta" class="task-meta"></div>
           </header>
-          <section class="task-section" aria-labelledby="activity-title">
-            <h3 id="activity-title">Activity</h3>
-            <ol id="activity" class="timeline" aria-live="polite" aria-relevant="additions"></ol>
+          <section class="task-section" aria-labelledby="transcript-title">
+            <div class="section-heading">
+              <h3 id="transcript-title">Transcript</h3>
+              <span id="stream-status" class="stream-status" role="status" hidden></span>
+            </div>
+            <div class="transcript-panel">
+              <p class="muted" id="transcript-empty"></p>
+              <ol class="transcript" id="transcript" role="log" aria-label="Agent transcript" aria-relevant="additions"></ol>
+            </div>
+            <div id="controls" hidden>
+              <ul id="directions" class="directions" aria-live="polite"></ul>
+              <form id="direct-form">
+                <label for="direction" id="direction-label">Message to agent</label>
+                <textarea id="direction" maxlength="512" rows="2" required></textarea>
+                <div class="action-row">
+                  <button class="primary" type="submit" id="send-direction">Send message</button>
+                  <button class="danger" type="button" id="stop">Stop task</button>
+                </div>
+              </form>
+              <p id="control-note" class="muted" role="status"></p>
+              <p class="error" id="control-error" role="alert" hidden></p>
+            </div>
           </section>
           <section class="task-section" id="result" aria-labelledby="result-title" hidden>
             <h3 id="result-title">Result</h3>
             <pre id="result-output"></pre>
             <p id="result-files" class="muted"></p>
           </section>
-          <section class="task-section" id="controls" aria-labelledby="controls-title" hidden>
-            <h3 id="controls-title">Directions</h3>
-            <ul id="directions" class="directions" aria-live="polite"></ul>
-            <form id="direct-form">
-              <label for="direction">Update the agent's instructions</label>
-              <textarea id="direction" maxlength="512" rows="3" required placeholder="For example, finish the tests before making further changes."></textarea>
-              <div class="action-row">
-                <button class="primary" type="submit" id="send-direction">Send direction</button>
-                <button class="danger" type="button" id="stop">Stop task</button>
-              </div>
-            </form>
-            <p id="control-note" class="muted" role="status"></p>
-            <p class="error" id="control-error" role="alert" hidden></p>
+          <section class="task-section" aria-labelledby="activity-title">
+            <h3 id="activity-title">Activity</h3>
+            <ol id="activity" class="timeline" aria-live="polite" aria-relevant="additions"></ol>
           </section>
         </article>
       </section>

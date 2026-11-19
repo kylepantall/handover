@@ -5,9 +5,9 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Store, HandoverError, summarize, type ErrorCode } from './store.ts';
 import { localApi } from './client.ts';
-import { serveDashboard } from './dashboard.ts';
+import { DashboardSessions, serveDashboard } from './dashboard.ts';
 import { buildMcpServer } from './tools.ts';
-import type { TaskKind, TaskStatus, Tunnel } from './types.ts';
+import type { TaskKind, TaskStatus, Tunnel, WorkerUpdate } from './types.ts';
 
 const MAX_BODY = 25 * 1024 * 1024;
 const MAX_WAIT_MS = 60_000;
@@ -20,13 +20,13 @@ function send(res: ServerResponse, code: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-function readJson(req: IncomingMessage): Promise<Record<string, any>> {
+function readJson(req: IncomingMessage, limit = MAX_BODY): Promise<Record<string, any>> {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => {
       size += c.length;
-      if (size > MAX_BODY) {
+      if (size > limit) {
         reject(new HandoverError('too_large', 'body too large'));
         req.destroy();
       } else chunks.push(c);
@@ -56,12 +56,49 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
   if (!token) throw new Error('a token is required');
   const expected = digest(token);
   const api = localApi(store);
+  const sessions = new DashboardSessions();
 
   const authorized = (req: IncomingMessage, url: URL, headerOnly = false) => {
     const header = req.headers.authorization ?? '';
     const given = header.startsWith('Bearer ') ? header.slice(7) : headerOnly ? null : url.searchParams.get('token');
     return given != null && timingSafeEqual(digest(given), expected);
   };
+
+  function streamTranscript(id: string, req: IncomingMessage, res: ServerResponse, url: URL) {
+    let after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? 0);
+    store.transcript(id, after); // Validate the task and cursor before sending headers.
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      'x-accel-buffering': 'no',
+      'x-content-type-options': 'nosniff',
+    });
+    let writable = res.write('retry: 1000\n\n');
+    let lastWrite = Date.now();
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const close = () => { clearInterval(interval); res.end(); };
+    res.on('close', () => clearInterval(interval));
+    res.on('drain', () => { writable = true; });
+    const publish = () => {
+      if (!sessions.has(req) && !authorized(req, url, true)) return close();
+      if (!writable) return;
+      try {
+        const page = store.transcript(id, after);
+        if (page.events.length) {
+          after = page.cursor;
+          writable = res.write(`id: ${after}\nevent: transcript\ndata: ${JSON.stringify(page)}\n\n`);
+          lastWrite = Date.now();
+        } else if (Date.now() - lastWrite >= 15_000) {
+          writable = res.write(': keepalive\n\n');
+          lastWrite = Date.now();
+        }
+      } catch {
+        close(); // The task was removed while this browser was watching it.
+      }
+    };
+    interval = setInterval(publish, 200);
+    publish();
+  }
 
   async function handleMcp(req: IncomingMessage, res: ServerResponse, url: URL) {
     if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
@@ -93,21 +130,57 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
 
     if (url.pathname === '/health') return send(res, 200, { ok: true });
-    if (req.method === 'GET' && serveDashboard(url.pathname, res)) return;
-    const controls = parts[0] === 'tasks' && ['direct', 'stop', 'controls', 'stopped'].includes(parts[2] ?? '');
-    if (!authorized(req, url, parts[0] === 'dashboard' || controls)) return send(res, 401, { error: 'unauthorized' });
-    if (url.pathname === '/dashboard/overview' && req.method === 'GET')
-      return send(res, 200, { tasks: store.list().map(summarize), agents: store.agents({ all: true }) });
-    if (parts[0] === 'dashboard' && parts[1] === 'task' && parts.length === 3 && req.method === 'GET') {
-      const task = store.get(parts[2]!);
-      return send(res, 200, {
-        task: summarize(task),
-        activity: store.activity(task.id, Number(url.searchParams.get('after') ?? 0)),
-        directions: task.directions ?? [],
-        output: task.output?.slice(0, 64_000),
-        outputTruncated: (task.output?.length ?? 0) > 64_000,
-      });
+    if (url.pathname === '/' && req.method === 'GET') {
+      res.writeHead(302, { location: '/dashboard', 'cache-control': 'no-store' });
+      return res.end();
     }
+    if (req.method === 'GET' && serveDashboard(url.pathname, res)) return;
+    if (parts[0] === 'dashboard') {
+      // A cross-origin form cannot add this header or send a preflight that the relay accepts.
+      if (req.method === 'POST' && req.headers['x-handover-dashboard'] !== '1')
+        return send(res, 403, { error: 'Open the Handover dashboard to make this request.' });
+      if (url.pathname === '/dashboard/login' && req.method === 'POST') {
+        const { token: entered } = await readJson(req, 4096);
+        if (typeof entered !== 'string' || !timingSafeEqual(digest(entered), expected))
+          return send(res, 401, { error: 'That token did not match the relay.' });
+        sessions.signIn(req, res);
+        return send(res, 200, { ok: true });
+      }
+      if (url.pathname === '/dashboard/logout' && req.method === 'POST') {
+        sessions.signOut(req, res);
+        return send(res, 200, { ok: true });
+      }
+      if (!sessions.has(req) && !authorized(req, url, true))
+        return send(res, 401, { error: 'Sign in to the Handover dashboard.' });
+      if (url.pathname === '/dashboard/overview' && req.method === 'GET')
+        return send(res, 200, { tasks: store.list().map(summarize), agents: store.agents({ all: true }) });
+      const [, category, id, action] = parts;
+      if (category === 'task' && id && parts.length <= 4) {
+        if (action === 'transcript' && req.method === 'GET') return streamTranscript(id, req, res, url);
+        if (action === 'direct' && req.method === 'POST') {
+          const { attempt, message } = await readJson(req, 4096);
+          store.direct(id, attempt, message);
+          return send(res, 200, { ok: true });
+        }
+        if (action === 'stop' && req.method === 'POST') {
+          const { attempt } = await readJson(req, 4096);
+          return send(res, 200, summarize(store.stop(id, attempt)));
+        }
+        if (!action && req.method === 'GET') {
+          const task = store.get(id);
+          return send(res, 200, {
+            task: summarize(task),
+            activity: store.activity(id, Number(url.searchParams.get('after') ?? 0)),
+            directions: task.directions ?? [],
+            output: task.output?.slice(0, 64_000),
+            outputTruncated: (task.output?.length ?? 0) > 64_000,
+          });
+        }
+      }
+      return send(res, 404, { error: 'not found' });
+    }
+    const controls = parts[0] === 'tasks' && ['direct', 'stop', 'controls', 'stopped', 'worker-live'].includes(parts[2] ?? '');
+    if (!authorized(req, url, controls)) return send(res, 401, { error: 'unauthorized' });
     if (url.pathname === '/keyhop-session/tasks' && req.method === 'POST')
       return send(res, 201, store.create({ ...(await readJson(req) as any), keyhopSession: true }));
     if (parts[0] === 'mcp' && parts.length === 1) return handleMcp(req, res, url);
@@ -159,6 +232,10 @@ export function startServer({ port = 7777, host = '0.0.0.0', token, store = new 
       const { by, attempt } = await readJson(req);
       store.workerStopped(id, by, attempt);
       return send(res, 200, { ok: true });
+    }
+    if (id && action === 'worker-live' && m === 'POST') {
+      const update = await readJson(req, 512 * 1024);
+      return send(res, 200, store.workerUpdate(id, update as unknown as WorkerUpdate));
     }
     if (id && action === 'claim' && m === 'POST') return send(res, 200, store.claim(id, await readJson(req)));
     if (id && action === 'renew' && m === 'POST') return send(res, 200, store.renew(id, await readJson(req)));

@@ -43,6 +43,27 @@ export interface Direction {
   at: string;
   message: string;
   deliveredAt?: string;
+  failedAt?: string;
+}
+
+export interface TranscriptChunk {
+  /** Consecutive deltas for one assistant message share an ID. */
+  messageId: string;
+  text: string;
+}
+
+export interface TranscriptEntry extends TranscriptChunk {
+  seq: number;
+  attempt: number;
+  role: 'assistant' | 'user';
+  direction?: number;
+}
+
+export interface WorkerUpdate {
+  by: string;
+  attempt: number;
+  chunks: Array<TranscriptChunk & { seq: number }>;
+  receipts: Array<{ cursor: number; accepted: boolean }>;
 }
 
 export interface TaskControls {
@@ -73,6 +94,7 @@ export interface Task {
   keyhopSession?: true;
   /** Handover launched the claimant and can stop its process. */
   managed?: boolean;
+  liveInput?: boolean;
   stopRequestedAt?: string;
   stoppedAt?: string;
   /** Peer mode: agent name of the peer holding this task (set by the client, not stored). */
@@ -112,6 +134,7 @@ export interface ClaimOptions {
   kind?: TaskKind;
   interactive?: boolean;
   managed?: boolean;
+  liveInput?: boolean;
   /** Compare against this claim when renewing a managed task. */
   attempt?: number;
 }
@@ -185,6 +208,7 @@ export interface Api {
   progress(id: string, input: { by: string; message: string }): Promise<void>;
   controls(id: string, by: string, attempt: number, after: number): Promise<TaskControls>;
   workerStopped(id: string, by: string, attempt: number): Promise<void>;
+  workerUpdate(id: string, update: WorkerUpdate, signal?: AbortSignal): Promise<{ status: TaskStatus; directions: Direction[] }>;
   claim(id: string, opts?: ClaimOptions): Promise<Task>;
   claimNext(opts?: ClaimOptions): Promise<Task | null>;
   renew(id: string, opts?: ClaimOptions): Promise<Task>;

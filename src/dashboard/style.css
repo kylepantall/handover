@@ -67,6 +67,18 @@ input, textarea { width: 100%; border: 1px solid #aebeb4; border-radius: 8px; pa
 .state[data-state="failed"], .state[data-state="cancelled"] { background: #fbe8e8; color: #8d2e31; }
 .task-section { border-top: 1px solid var(--line); padding: 1.1rem 0; }
 .task-section h3 { font-size: 1rem; margin-bottom: .78rem; }
+.section-heading { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; }
+.stream-status { color: var(--muted); font-size: .76rem; }
+.stream-status.is-live { color: var(--accent); font-weight: 650; }
+.transcript-panel { min-height: 6rem; max-height: min(48vh, 35rem); overflow: auto; padding: .85rem; background: #f5f8f5; border: 1px solid var(--line); border-radius: 10px; }
+.transcript { list-style: none; margin: 0; padding: 0; display: grid; gap: .65rem; }
+.transcript-item { max-width: min(92%, 42rem); width: fit-content; min-width: min(9rem, 100%); border-radius: 9px; background: #fff; border: 1px solid #dce6df; padding: .65rem .8rem; }
+.transcript-item[data-role="user"] { justify-self: end; background: #e6f3ea; border-color: #cedfd3; }
+.transcript-item p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .88rem; line-height: 1.5; }
+.transcript-item strong, .transcript-item small { display: block; color: var(--muted); font-size: .76rem; }
+.transcript-item strong { margin-bottom: .24rem; }
+.transcript-item small { margin-top: .25rem; }
+#controls { margin-top: .9rem; }
 .timeline { max-height: 23rem; overflow: auto; padding-right: .4rem; }
 .timeline li { display: grid; grid-template-columns: 5.4rem minmax(0, 1fr); gap: .65rem; padding: .55rem 0; border-bottom: 1px solid #eef1ed; }
 .timeline li:last-child { border-bottom: none; }
