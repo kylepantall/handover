@@ -92,9 +92,20 @@ Only paired devices and their agents are accepted: `to` with any other name is r
 
 ## Watch a running handover
 
+Run `handover dashboard`, open the URL it prints, and sign in with your relay token from `handover token`. Use an HTTPS relay URL when connecting across networks. The dashboard shows online agents, handovers, live milestones and finished results.
+
+- **Send direction** queues an instruction for the selected agent's current task. The dashboard shows when the agent reads it through `handover_controls`. Agents check between steps and after long operations.
+- **Force stop** terminates the process running a task picked up by a Handover worker. The dashboard confirms when the worker exits. For an agent in an external MCP chat, **Request stop** cancels the relay task and the agent receives it at its next check-in.
+
 In Claude Code or Codex, ask **“Show running handovers”**, then **“Follow handover <id> and show me updates until it finishes.”** Either client can follow work on another machine. The observer can join after pickup, disconnect, and read missed updates later.
 
 Claude Code also receives running handover IDs in its session-start context. The relay records creation, claims, requeues, and final status automatically. Agents can post short milestones while working. The timeline keeps the latest 256 events per task until the task is cleared or expires. Earlier tasks show activity recorded after the relay upgrade. Updates appear in the chat where you ask to follow a task.
+
+### Hand over a task that needs Keyhop
+
+Create the task with `handover_create` using `keyhopSession: true` and address it to the machine with the vault, for example `codex@mac`. From a terminal, use `handover wait --keyhop-session --to codex@mac --objective "…"`. On the target machine, ask an open agent to claim it. The agent gets instructions to prepare one local Keyhop plan and run the secret-backed steps after one approval and one biometric check. Keep credentials and Keyhop session IDs out of the handover context and results.
+
+Update the relay and target client before using this mode. These tasks wait for interactive pickup so someone on the target machine can approve the plan.
 
 ## How agents pick up tasks
 
@@ -135,6 +146,7 @@ If an agent can't finish, it answers `FAILED: …`, and the task is marked faile
 | `handover wait --objective "…"` | Create a task and block until it's done |
 | `handover worker [--with claude\|codex \| --exec "CMD"]` | Run tasks in the foreground with an agent |
 | `handover list` | Show the queue |
+| `handover dashboard` | Print the browser dashboard URL and start the local relay if needed |
 | `handover clear [ID…]` | Delete finished handovers, or just these ids (open ones are cancelled). `--all` also cancels and deletes every open one |
 | `handover devices` | The paired machines: online or not, version, agents, what's running. `handover devices forget NAME` unpairs one |
 | `handover link` | Host: print the join commands and token |
@@ -236,6 +248,7 @@ Relay tuning lives in `config.json` under `relay` (`port`, `tunnel`, `leaseSecon
 | `handover_running` | List running tasks and their workers across the relay |
 | `handover_follow` | Read timeline updates by task id and resume from the returned cursor |
 | `handover_progress` | Post a milestone as the current claimant |
+| `handover_controls` | Read dashboard directions and stop requests for the current claim |
 | `handover_wait` | Wait for a task you created to finish; returns its output and files |
 | `handover_claim` | Claim a specific task |
 | `handover_renew` | Extend your claim on long work |

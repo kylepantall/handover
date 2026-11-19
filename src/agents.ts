@@ -97,6 +97,8 @@ export const ADAPTERS: Record<AgentKind, Adapter> = {
       '--skip-git-repo-check',
       '-c',
       'mcp_servers.handover.default_tools_approval_mode=approve',
+      '-c',
+      'mcp_servers.handover.env.HANDOVER_WORKER=enabled',
       ...(full ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--sandbox', 'workspace-write']),
       '-',
     ],

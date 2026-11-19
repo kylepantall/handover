@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Handover</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+  <script type="module" src="/dashboard/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/dashboard" class="wordmark">Handover</a>
+    <div class="connection">
+      <span class="connection-status" role="status" id="connection">Locked</span>
+      <button class="subtle" type="button" id="lock" hidden>Lock</button>
+    </div>
+  </header>
+  <main>
+    <section class="login" id="login" aria-labelledby="login-title">
+      <h1 id="login-title">Connect to your relay</h1>
+      <p>Enter the token from <code>handover token</code> to view tasks and control running agents.</p>
+      <form id="login-form">
+        <label for="token">Relay token</label>
+        <input type="password" autocomplete="off" spellcheck="false" id="token" required>
+        <button class="primary" type="submit">Connect</button>
+        <p class="error" id="login-error" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <div id="dashboard" class="dashboard" hidden>
+      <aside class="agents" aria-labelledby="agents-title">
+        <h2 id="agents-title">Agents</h2>
+        <ul class="agent-list" id="agents"></ul>
+      </aside>
+      <section class="queue" aria-labelledby="queue-title">
+        <div class="pane-heading">
+          <h1 id="queue-title">Handovers</h1>
+          <span id="queue-count"></span>
+        </div>
+        <div class="filters" aria-label="Filter by status">
+          <button type="button" aria-pressed="true" data-filter="active">Active</button>
+          <button type="button" aria-pressed="false" data-filter="finished">Finished</button>
+        </div>
+        <ul class="task-list" id="tasks"></ul>
+      </section>
+      <section class="detail" aria-label="Selected handover">
+        <div id="empty-detail" class="empty-detail">Select a handover to see its activity.</div>
+        <article id="task-detail" hidden>
+          <header class="task-header">
+            <p id="task-status" class="state"></p>
+            <h2 id="task-title"></h2>
+            <div id="task-meta" class="task-meta"></div>
+          </header>
+          <section class="task-section" aria-labelledby="activity-title">
+            <h3 id="activity-title">Activity</h3>
+            <ol id="activity" class="timeline" aria-live="polite" aria-relevant="additions"></ol>
+          </section>
+          <section class="task-section" id="result" aria-labelledby="result-title" hidden>
+            <h3 id="result-title">Result</h3>
+            <pre id="result-output"></pre>
+            <p id="result-files" class="muted"></p>
+          </section>
+          <section class="task-section" id="controls" aria-labelledby="controls-title" hidden>
+            <h3 id="controls-title">Directions</h3>
+            <ul id="directions" class="directions" aria-live="polite"></ul>
+            <form id="direct-form">
+              <label for="direction">Update the agent's instructions</label>
+              <textarea id="direction" maxlength="512" rows="3" required placeholder="For example, finish the tests before making further changes."></textarea>
+              <div class="action-row">
+                <button class="primary" type="submit" id="send-direction">Send direction</button>
+                <button class="danger" type="button" id="stop">Stop task</button>
+              </div>
+            </form>
+            <p id="control-note" class="muted" role="status"></p>
+            <p class="error" id="control-error" role="alert" hidden></p>
+          </section>
+        </article>
+      </section>
+    </div>
+  </main>
+  <dialog id="stop-confirm">
+    <form method="dialog">
+      <h2 id="stop-title">Stop this handover?</h2>
+      <p id="stop-description"></p>
+      <div class="action-row">
+        <button autofocus type="submit" value="dismiss">Keep running</button>
+        <button class="danger" type="submit" value="stop">Stop task</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

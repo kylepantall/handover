@@ -7,8 +7,8 @@ import path from 'node:path';
 import * as ui from '@clack/prompts';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { RelayError } from './client.ts';
-import { agentName, DEFAULT_PORT, loadConfig, roleOf, saveConfig } from './config.ts';
-import { connect } from './connect.ts';
+import { agentName, DEFAULT_PORT, endpoint, loadConfig, roleOf, saveConfig } from './config.ts';
+import { connect, hostUrl } from './connect.ts';
 import { formatDevices, groupDevices } from './devices.ts';
 import { ensureLocalRelay, hostRelay, keepLocalRelay, stopHosting } from './host.ts';
 import { startResponder } from './responder.ts';
@@ -106,6 +106,7 @@ export async function serve(p: Paths, o: ServeOptions): Promise<void> {
   for (const u of urls) console.log(`  url:    ${u}`);
   console.log(`\n  Token:  handover token   (stored in ${p.config})`);
   console.log(`  MCP:    ${urls[0]}/mcp   Authorization: Bearer <token>   X-Handover-Agent: <name>`);
+  console.log(`  Dashboard: ${urls[0]}/dashboard`);
   console.log(`  ChatGPT etc.: ${urls[0]}/mcp?token=<token>&agent=<name>`);
 }
 
@@ -130,9 +131,14 @@ export interface WaitOptions {
   out?: string;
   timeoutSeconds?: number;
   json?: boolean;
+  keyhopSession?: boolean;
 }
 
 export async function wait(p: Paths, o: WaitOptions): Promise<number> {
+  if (o.keyhopSession && !o.objective) {
+    console.error('--keyhop-session is used with --objective and --to when creating a handover');
+    return EXIT.usage;
+  }
   const config = await loadConfig(p);
   // This machine's relay holds new tasks in relay and peer mode: host it here if nothing else is.
   await ensureLocalRelay(p, config);
@@ -142,7 +148,7 @@ export async function wait(p: Paths, o: WaitOptions): Promise<number> {
   let id = o.id;
   if (o.objective) {
     const task = await api
-      .create({ id, objective: o.objective, context, from: agent, to: o.to, priority: o.priority })
+      .create({ id, objective: o.objective, context, from: agent, to: o.to, priority: o.priority, keyhopSession: o.keyhopSession })
       .catch((err: Error) => {
         // Peer mode keeps new tasks on this machine's own relay.
         if (!(err instanceof RelayError))
@@ -393,6 +399,18 @@ export async function list(p: Paths, o: { status?: string; for?: string }): Prom
   return EXIT.ok;
 }
 
+export async function dashboard(p: Paths): Promise<number | null> {
+  const config = await loadConfig(p);
+  const ep = endpoint(config);
+  if (!ep.token) throw new Error('Set up Handover with handover host or handover join first.');
+  const relay = await ensureLocalRelay(p, config);
+  const url = process.env.HANDOVER_URL || (roleOf(config) === 'host'
+    ? `http://127.0.0.1:${config.relay?.port ?? DEFAULT_PORT}`
+    : (await hostUrl(p, config)) ?? ep.url);
+  console.log(new URL('/dashboard', url).href);
+  return relay === 'hosting' ? null : EXIT.ok;
+}
+
 /** `as`: which agent started this server (registered as `handover mcp --as codex`); it claims as kind@machine. */
 export async function mcp(p: Paths, { as }: { as?: AgentKind } = {}): Promise<void> {
   const config = await loadConfig(p);
@@ -409,5 +427,9 @@ export async function mcp(p: Paths, { as }: { as?: AgentKind } = {}): Promise<vo
     process.exit(EXIT.ok);
   });
   const notice = await updateNotice(p);
-  await buildMcpServer(api, { agentName: as ? agentAddress(as, machine) : machine, instructions: notice ? `Tell the user once: ${notice}` : undefined }).connect(new StdioServerTransport());
+  await buildMcpServer(api, {
+    agentName: as ? agentAddress(as, machine) : machine,
+    instructions: notice ? `Tell the user once: ${notice}` : undefined,
+    interactive: !process.env[WORKER_ENV],
+  }).connect(new StdioServerTransport());
 }
