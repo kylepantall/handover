@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.0
+
+- Open the relay URL or run `handover dashboard`, then sign in with your relay token. The browser session survives refreshes and can be ended with **Sign out**.
+- Watch the live transcript and send messages into the active conversation of a Handover-managed Claude Code or Codex worker. External MCP chats receive directions at their next check-in.
+- Force-stop managed workers and see when the worker process has stopped.
+- Route tasks that need Keyhop approval with `handover wait --keyhop-session --to AGENT@MACHINE`. These tasks wait for interactive pickup on the vault machine.
+- Update the relay and workers to use the transcript and live message controls.
+
 ## 0.13.0
 
 - Ask Claude Code or Codex to “show running handovers” and “follow handover <id>” to see the worker and its timestamped updates. Following a task leaves its claim with the worker.
