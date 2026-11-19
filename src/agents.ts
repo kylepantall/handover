@@ -23,7 +23,7 @@ export interface Adapter {
   register(state?: McpState): Promise<void>;
   /** Removes the "handover" MCP server if it points at this install. */
   unregister(): Promise<UnlinkResult>;
-  /** argv running one task unattended, prompt on stdin. */
+  /** argv for the agent's live protocol on stdin and stdout. */
   execArgv(fullAccess: boolean): string[];
 }
 
@@ -81,8 +81,12 @@ export const ADAPTERS: Record<AgentKind, Adapter> = {
     remove: ['--scope', 'user'],
     // Handover's own tools are allowed so the agent can complete with files;
     // anything else follows the user's Claude Code permission settings.
-    // --allowedTools is variadic, so it goes last (the prompt comes on stdin).
-    exec: (full) => ['-p', ...(full ? ['--dangerously-skip-permissions'] : []), '--allowedTools', 'mcp__handover'],
+    // --allowedTools is variadic, so it goes last.
+    exec: (full) => [
+      '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+      '--include-partial-messages', '--replay-user-messages',
+      ...(full ? ['--dangerously-skip-permissions'] : []), '--allowedTools', 'mcp__handover',
+    ],
   }),
   codex: adapter('codex', 'Codex', {
     add: [],
@@ -90,17 +94,13 @@ export const ADAPTERS: Record<AgentKind, Adapter> = {
     // Unattended Codex can't answer approvals, so handover's own tools are
     // approved up front (as for Claude), and it may write in the task's own
     // folder (its working directory) but nowhere else, with no network.
-    // The -c value has no quotes: Codex reads a value that isn't TOML as a
-    // string, and quotes would not survive cmd on Windows. "-": prompt on stdin.
-    exec: (full) => [
-      'exec',
-      '--skip-git-repo-check',
+    // The app-server thread and turn receive the sandbox and approval policy explicitly.
+    exec: () => [
+      'app-server',
       '-c',
       'mcp_servers.handover.default_tools_approval_mode=approve',
       '-c',
       'mcp_servers.handover.env.HANDOVER_WORKER=enabled',
-      ...(full ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--sandbox', 'workspace-write']),
-      '-',
     ],
   }),
 };

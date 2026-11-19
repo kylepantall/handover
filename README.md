@@ -92,9 +92,11 @@ Only paired devices and their agents are accepted: `to` with any other name is r
 
 ## Watch a running handover
 
-Run `handover dashboard`, open the URL it prints, and sign in with your relay token from `handover token`. Use an HTTPS relay URL when connecting across networks. The dashboard shows online agents, handovers, live milestones and finished results.
+Open the relay URL or run `handover dashboard` to find it. Sign in from the page with the token from `handover token`. The browser keeps your session across refreshes. Use **Sign out** to end it. Use an HTTPS relay URL when connecting across networks.
 
-- **Send direction** queues an instruction for the selected agent's current task. The dashboard shows when the agent reads it through `handover_controls`. Agents check between steps and after long operations.
+- **Transcript** streams visible messages from Handover-managed Claude Code and Codex workers. The relay keeps recent messages in memory until it restarts. The queue retains the final result as usual.
+- **Send message** delivers text into that worker's active conversation. Codex steers the current turn. Claude Code handles the input in its running stream. Use current versions of the agent CLIs.
+- **Send direction** is available for external MCP chats and custom workers that use `handover_controls`. Their progress appears under **Activity**, and they receive directions at their next check-in.
 - **Force stop** terminates the process running a task picked up by a Handover worker. The dashboard confirms when the worker exits. For an agent in an external MCP chat, **Request stop** cancels the relay task and the agent receives it at its next check-in.
 
 In Claude Code or Codex, ask **“Show running handovers”**, then **“Follow handover <id> and show me updates until it finishes.”** Either client can follow work on another machine. The observer can join after pickup, disconnect, and read missed updates later.
@@ -111,7 +113,7 @@ Update the relay and target client before using this mode. These tasks wait for 
 
 | Setup | What happens |
 |---|---|
-| Auto-pickup on (the setup question, or `handover agents all on`) | Each task runs unattended with `claude -p` or `codex exec`, in its own folder. With both, each agent has its own worker, so they run at the same time. macOS/Linux: runs at login. Windows: runs while Claude Code or Codex is open |
+| Auto-pickup on (the setup question, or `handover agents all on`) | Each task runs with Claude Code or the Codex app server in its own folder. With both, each agent has its own worker, so they run at the same time. macOS/Linux: runs at login. Windows: runs while Claude Code or Codex is open |
 | Auto-pickup off | Claude Code shows pending tasks when a session starts. Ask any agent to "pick up the handover", or to "watch for handovers" (`handover_watch`) |
 | Other MCP clients | See [Connect other agents](#connect-other-agents) |
 

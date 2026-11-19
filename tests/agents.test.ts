@@ -21,6 +21,7 @@ import { buildMcpServer } from '../src/tools.ts';
 import type { Task } from '../src/types.ts';
 
 const CLI = fileURLToPath(new URL('../src/index.ts', import.meta.url));
+const LIVE_AGENT = fileURLToPath(new URL('./fixtures/live-agent.ts', import.meta.url));
 const TOKEN = 'agents-test-token-0123456789abcdef';
 let dir: string;
 let fakes: string;
@@ -43,11 +44,7 @@ if [ "$1" = mcp ]; then
   esac
 fi
 echo "$*" >> "$FAKE_STATE/$name.runs"
-input="$(cat)"
-case "$input" in
-  *"please fail"*) echo "FAILED: could not" ;;
-  *) printf '%s\n' "$input" | head -n 1 | sed "s/^/done by $name: /" ;;
-esac
+exec "$FAKE_BUN" "$FAKE_LIVE_AGENT" "$name"
 `;
 
 beforeEach(async () => {
@@ -72,6 +69,8 @@ function start(args: string[], env: Record<string, string> = {}) {
       HANDOVER_HOME: path.join(dir, 'home'),
       HANDOVER_AGENT_PATH: fakes,
       FAKE_STATE: dir,
+      FAKE_BUN: process.execPath,
+      FAKE_LIVE_AGENT: LIVE_AGENT,
       CLAUDE_CONFIG_DIR: path.join(dir, 'claude'),
       ...env,
     },
@@ -153,9 +152,10 @@ describe.skipIf(process.platform === 'win32')('agents', () => {
     await until(() => store.get(task.id).status === 'success');
     expect(store.get(task.id).output).toBe(`done by codex: # Handover ${task.id}`);
     const argv = await read('codex.runs');
-    expect(argv).toContain('exec');
+    expect(argv).toContain('app-server');
     expect(argv).not.toContain('dangerously'); // default permissions
-    expect(argv).toContain('--sandbox workspace-write'); // it may write in its own task folder
+    expect(JSON.parse(await read('codex.thread'))).toMatchObject({ approvalPolicy: 'never', sandbox: 'workspace-write' });
+    expect(JSON.parse(await read('codex.turn'))).toMatchObject({ type: 'workspaceWrite', networkAccess: false });
     expect(argv).toContain('mcp_servers.handover.default_tools_approval_mode=approve'); // and use handover's tools
   });
 
